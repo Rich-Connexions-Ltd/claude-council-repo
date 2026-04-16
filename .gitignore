@@ -69,6 +69,11 @@ REVIEW_Sprint*.md
 FINDINGS_Sprint*.md
 # ...except archived plans, which are deliberately tracked as history
 !Documentation/archive/PLAN_Sprint*.md
+# ...and except test fixtures for findings-digest (Sprint 5 CI fix — the
+# fixtures were silently swallowed by the glob above, which meant
+# `pytest tests/test_digest.py` passed locally but failed on a fresh
+# clone with no fixture files present).
+!tests/fixtures/findings/FINDINGS_Sprint*.md
 .review-round-*
 .sprint-base-commit-*
 

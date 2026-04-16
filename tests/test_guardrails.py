@@ -80,9 +80,15 @@ def test_rm_rf_canonical_path_outside_blocked():
     assert r.returncode == 2
 
 
-def test_rm_rf_relative_traversal_blocked(tmp_path):
-    sub = tmp_path / "sub"
-    sub.mkdir()
+def test_rm_rf_relative_traversal_blocked():
+    """The hook validates commands — it does not run rm — so the cwd
+    does not need to exist on disk. We deliberately use a repo-anchored
+    path: on Linux CI, ``tmp_path`` is under ``/tmp`` which is in the
+    rule's allow-list, so a subdir of tmp_path would still resolve to
+    an allowed location. Using REPO_ROOT/nonexistent/sub makes the
+    test hold on macOS (TMPDIR under /var/folders) and Linux (/tmp is
+    not the repo parent)."""
+    sub = REPO_ROOT / "nonexistent-sub-for-rm-test" / "sub"
     r = _run(_bash("rm -rf ../..", cwd=str(sub)), mode="strict")
     assert r.returncode == 2
 

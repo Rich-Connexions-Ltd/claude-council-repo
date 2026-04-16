@@ -82,9 +82,18 @@ def run_git(
 
 
 def _init_git_repo(path: Path, *, branch: str = "main") -> None:
-    """Initialise a git repo with a single commit on the named branch."""
+    """Initialise a git repo with a single commit on the named branch.
+
+    Sprint 5: sets local user.email / user.name on the test repo so
+    that production code (which runs bare ``git`` commands without
+    our GIT_AUTHOR_EMAIL env injection) can still commit on CI. On a
+    developer's laptop the global gitconfig masks the missing local
+    identity; GitHub Actions runners have no global config.
+    """
     path.mkdir(parents=True, exist_ok=True)
     run_git(path, "init", "-b", branch)
+    run_git(path, "config", "user.email", "test@example.com")
+    run_git(path, "config", "user.name", "Test")
     (path / "README.md").write_text("initial\n")
     run_git(path, "add", "README.md")
     run_git(path, "commit", "-m", "init")
