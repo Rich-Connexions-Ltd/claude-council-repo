@@ -49,9 +49,27 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MANIFEST_PATH = REPO_ROOT / "scripts" / "template-manifest.json"
-DEFAULT_ANSWERS = (
-    REPO_ROOT / "tests" / "fixtures" / "bootstrap_answers" / "minimal.json"
-)
+
+# Inlined default answers (minimal, no-council, python-only bootstrap).
+# Previously loaded from tests/fixtures/bootstrap_answers/minimal.json,
+# but the fixture is template-excluded (test infrastructure that
+# downstream users don't need), which broke the template repo's CI.
+# Baking defaults into the script keeps it self-contained.
+DEFAULT_ANSWERS: dict = {
+    "identity.project_name": "bootstrap_smoke_project",
+    "identity.mvp_outcome": (
+        "ship bootstrap-smoke so the template surface stays self-sufficient"
+    ),
+    "identity.has_brief": False,
+    "stack.languages": ["python"],
+    "stack.framework.python": "none",
+    "knowledge.has_files": False,
+    "sprints.mode": "Skip — I'll do this later",
+    "council.review_mode": (
+        "Skip council entirely — ship as solo dev without reviewer"
+    ),
+    "bootstrap.rerun": False,
+}
 
 EXIT_OK = 0
 EXIT_BOOTSTRAP = 1
@@ -120,10 +138,18 @@ def _die(stream: str, header: str, proc: subprocess.CompletedProcess) -> None:
 
 
 def run_smoke(
-    profile: str, answers_path: Path, tmpdir: Path | None = None
+    profile: str,
+    answers_path: Path | None = None,
+    tmpdir: Path | None = None,
 ) -> int:
-    """Orchestrate one smoke run. Returns a POSIX exit code."""
-    if not answers_path.is_file():
+    """Orchestrate one smoke run. Returns a POSIX exit code.
+
+    When ``answers_path`` is None, the inlined DEFAULT_ANSWERS are
+    written to the virtual repo as answers.json. When a path is given
+    and doesn't exist, we fail loudly rather than silently falling
+    back (the caller asked for specific answers).
+    """
+    if answers_path is not None and not answers_path.is_file():
         print(
             f"answers file not found: {answers_path}", file=sys.stderr
         )
@@ -143,10 +169,16 @@ def run_smoke(
         virtual.mkdir()
         build_virtual_template(virtual)
 
-        # Copy the answers file into the virtual repo — bootstrap requires
-        # the file to resolve inside cwd.
+        # Answers: use supplied path if given, else write the inlined
+        # DEFAULT_ANSWERS. bootstrap requires the answers file to
+        # resolve inside cwd, so we always write/copy into `virtual/`.
         local_answers = virtual / "answers.json"
-        shutil.copy2(answers_path, local_answers)
+        if answers_path is not None:
+            shutil.copy2(answers_path, local_answers)
+        else:
+            local_answers.write_text(
+                json.dumps(DEFAULT_ANSWERS, indent=2) + "\n"
+            )
 
         bootstrap_result = subprocess.run(
             [
@@ -218,9 +250,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--answers",
-        default=str(DEFAULT_ANSWERS),
-        help="Path to a canned answers JSON file (default: "
-             "tests/fixtures/bootstrap_answers/minimal.json).",
+        default=None,
+        help="Path to a canned answers JSON file (default: inlined "
+             "minimal answers baked into this script).",
     )
     parser.add_argument(
         "--tmpdir",
@@ -231,9 +263,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
 
     tmp_arg = Path(args.tmpdir) if args.tmpdir else None
+    answers_arg = Path(args.answers) if args.answers else None
     return run_smoke(
         profile=args.profile,
-        answers_path=Path(args.answers),
+        answers_path=answers_arg,
         tmpdir=tmp_arg,
     )
 
