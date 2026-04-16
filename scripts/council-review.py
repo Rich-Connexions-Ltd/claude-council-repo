@@ -19,7 +19,7 @@ Exports:
   - find_untracked_source_files, preflight_code_review,
     PreflightResult -- Sprint 2 pre-flight check surface
 
-Last updated: Sprint 5 (2026-04-16) -- call_codex tempfile removed; RECURRING surfaced in convergence reporting
+Last updated: Sprint 6 (2026-04-16) -- metrics v2 schema + helper extraction; selective routing + tracker v3 + security enforcement; output-discipline clause + terse console
 
 Council of Experts review system for pair programming workflow.
 
@@ -78,6 +78,19 @@ _SECRET_PATTERNS = [
     re.compile(r"sk-ant-[A-Za-z0-9\-_]{20,}", re.IGNORECASE),
     re.compile(r"AIza[0-9A-Za-z\-_]{35}"),
     re.compile(r"xox[bprs]-[A-Za-z0-9\-_]{10,}"),
+    # Sprint 6 R1 #21: expand coverage to common credential formats.
+    # GitHub classic PATs start with ghp_; fine-grained ones use
+    # github_pat_; OAuth app tokens use gho_/ghu_/ghs_/ghr_.
+    re.compile(r"gh[pousr]_[A-Za-z0-9]{36,}"),
+    re.compile(r"github_pat_[A-Za-z0-9_]{50,}"),
+    # AWS access key ID — 20-char alphanumeric prefixed by AKIA/ASIA/AIDA/AGPA/AROA.
+    re.compile(r"(?:AKIA|ASIA|AIDA|AGPA|AROA|ANPA|ANVA|AIPA|AIDI)[A-Z0-9]{16}"),
+    # AWS secret access key — 40-char base64ish that appears after
+    # aws_secret_access_key= or in JSON "SecretAccessKey":"...".
+    re.compile(
+        r"(?:aws_secret_access_key|secretaccesskey)\s*[=:]\s*['\"]?[A-Za-z0-9+/=]{40}['\"]?",
+        re.IGNORECASE,
+    ),
     # Compound assignment names: catches FOO_API_KEY=..., SERVICE_SECRET_KEY=...,
     # PROJECT_TOKEN=..., AUTH_TOKEN=..., *_PRIVATE_KEY=..., *_CREDENTIALS=...
     re.compile(
@@ -92,30 +105,23 @@ _SECRET_PATTERNS = [
 ]
 
 
-def _emit_metrics(
-    repo_root: Path,
-    sprint: str,
-    review_type: str,
-    round_num: int,
-    *,
-    members_active: int,
-    members_succeeded: int,
-    elapsed_s: float,
-    verdict: str | None,
-    tracker_file: Path,
-) -> None:
-    """Append per-round metrics to council/metrics_Sprint<N>.json (Sprint 127 v6).
+METRICS_SCHEMA_VERSION = 2
+METRICS_SCHEMA_KEY = "_schema"
+METRICS_SCHEMA_VALUE = "council_metrics"
 
-    One JSON line per round so sprint cost can be compared post-hoc.
-    Safe to call repeatedly; appends to an existing file.
-    """
-    findings: list[dict] = []
-    if tracker_file.exists():
-        try:
-            findings = _read_tracker(tracker_file)
-        except Exception:  # noqa: BLE001
-            findings = []
 
+def _compute_findings_by_lens(findings: list[dict]) -> dict[str, int]:
+    """Count findings grouped by lens. Returns a plain dict so it
+    serialises cleanly as JSON. Findings with missing/empty lens are
+    bucketed under ``unknown`` to match tracker load-time defaults."""
+    counts: dict[str, int] = {}
+    for f in findings:
+        lens = (f.get("lens") or "unknown") or "unknown"
+        counts[lens] = counts.get(lens, 0) + 1
+    return counts
+
+
+def _compute_findings_counts(findings: list[dict]) -> tuple[dict[str, int], dict[str, int]]:
     by_sev = {"high": 0, "medium": 0, "low": 0}
     by_status = {
         "ADDRESSED": 0, "WONTFIX": 0, "OPEN": 0,
@@ -128,7 +134,48 @@ def _emit_metrics(
         st = (f.get("status") or "").upper()
         if st in by_status:
             by_status[st] += 1
+    return by_sev, by_status
 
+
+def _write_metrics_row(out_file: Path, row: dict) -> None:
+    """Append a row to the metrics JSONL. Writes the schema sentinel
+    as the first line of a new file; appends only data rows thereafter.
+    The sentinel row has the shape
+    ``{"_schema": "council_metrics", "version": N}`` and is never
+    interleaved with data rows."""
+    out_file.parent.mkdir(exist_ok=True)
+    write_header = not out_file.exists() or out_file.stat().st_size == 0
+    with out_file.open("a", encoding="utf-8") as fh:
+        if write_header:
+            fh.write(json.dumps({
+                METRICS_SCHEMA_KEY: METRICS_SCHEMA_VALUE,
+                "version": METRICS_SCHEMA_VERSION,
+            }) + "\n")
+        fh.write(json.dumps(row) + "\n")
+
+
+def _emit_metrics(
+    repo_root: Path,
+    sprint: str,
+    review_type: str,
+    round_num: int,
+    *,
+    members_active: int,
+    members_succeeded: int,
+    elapsed_s: float,
+    verdict: str | None,
+    tracker_file: Path,
+    security_bypassed: bool = False,
+) -> None:
+    """Append one per-round metrics row. Helpers own the schema math;
+    this function is the wiring layer."""
+    findings: list[dict] = []
+    if tracker_file.exists():
+        try:
+            findings = _read_tracker(tracker_file)
+        except Exception:  # noqa: BLE001
+            findings = []
+    by_sev, by_status = _compute_findings_counts(findings)
     record = {
         "sprint": sprint,
         "review_type": review_type,
@@ -146,14 +193,13 @@ def _emit_metrics(
         "findings_verified": by_status["VERIFIED"],
         "findings_reopened": by_status["REOPENED"],
         "findings_recurring": by_status["RECURRING"],
+        "findings_by_lens": _compute_findings_by_lens(findings),
+        "security_bypassed": bool(security_bypassed),
         "verdict": verdict or "UNKNOWN",
     }
-
-    out_dir = repo_root / "council"
-    out_dir.mkdir(exist_ok=True)
-    out_file = out_dir / f"metrics_Sprint{sprint}.jsonl"
-    with out_file.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(record) + "\n")
+    _write_metrics_row(
+        repo_root / "council" / f"metrics_Sprint{sprint}.jsonl", record
+    )
 
 
 def redact_secrets(text: str) -> str:
@@ -189,7 +235,18 @@ def ensure_api_keys_from_profile():
                 continue
             key, _, value = rest.partition("=")
             key = key.strip()
-            value = value.strip().strip('"').strip("'")
+            value = value.strip()
+            # Sprint 6 R1 #22: strip inline comments before stripping
+            # quotes, so `FOO=bar  # my api key` doesn't end up as
+            # `bar  # my api key`. The simple heuristic is "# preceded
+            # by whitespace" — it avoids mangling values that legitimately
+            # contain #, like base64 or URL anchors, because those
+            # aren't preceded by whitespace.
+            if " #" in value:
+                value = value.split(" #", 1)[0].rstrip()
+            elif "\t#" in value:
+                value = value.split("\t#", 1)[0].rstrip()
+            value = value.strip('"').strip("'")
             if key in missing and value:
                 os.environ[key] = value
                 missing.discard(key)
@@ -212,12 +269,138 @@ def load_config(config_path: Path) -> dict:
         return json.load(f)
 
 
-def get_active_members(config: dict, review_type: str) -> list[dict]:
-    """Return only council members whose phases include the review type."""
-    return [
+def get_active_members(
+    config: dict,
+    review_type: str,
+    *,
+    lenses: set[str] | None = None,
+) -> list[dict]:
+    """Return only council members whose phases include the review type.
+
+    When ``lenses`` is non-None (only valid for code reviews), the
+    filter is narrowed to members whose ``role`` is in the set. The
+    caller is responsible for validating lens names and for enforcing
+    the security-non-removable rule before passing ``lenses`` here.
+    """
+    members = [
         m for m in config["council"]["members"]
         if review_type in m.get("phases", ["plan", "code"])
     ]
+    if lenses is not None:
+        members = [m for m in members if m.get("role") in lenses]
+    return members
+
+
+# ---------------------------------------------------------------------------
+# Selective routing — Sprint 6
+# ---------------------------------------------------------------------------
+
+
+class LensArgError(Exception):
+    """Raised when a --lenses or --auto-lenses invocation is malformed
+    or violates the security-non-removable rule."""
+
+
+def _known_lens_roles(config: dict) -> list[str]:
+    return sorted({m["role"] for m in config["council"]["members"]})
+
+
+def parse_lenses_arg(raw: str, valid_roles: list[str]) -> set[str]:
+    """Parse the comma-separated ``--lenses`` value. Rejects degenerate
+    inputs (empty string, lone commas, whitespace-only, blank entries,
+    duplicates, unknown names) with a specific message per R1 #9.
+
+    Returns the parsed set on success; raises ``LensArgError`` on any
+    failure. Callers surface the message to stderr and exit 2.
+    """
+    stripped = raw.strip()
+    if not stripped:
+        raise LensArgError("--lenses value is empty")
+    if stripped in (",", ",,"):
+        raise LensArgError("--lenses value is a lone comma")
+    parts = raw.split(",")
+    seen: list[str] = []
+    for part in parts:
+        token = part.strip()
+        if not token:
+            raise LensArgError(
+                f"--lenses contains an empty entry (near {part!r})"
+            )
+        if token in seen:
+            raise LensArgError(
+                f"--lenses contains a duplicate entry: {token!r}"
+            )
+        seen.append(token)
+    unknown = [t for t in seen if t not in valid_roles]
+    if unknown:
+        raise LensArgError(
+            f"--lenses contains unknown lens(es) {unknown}. "
+            f"Valid lenses: {valid_roles}"
+        )
+    return set(seen)
+
+
+def auto_lens_set(changed_paths: list[str], valid_roles: list[str]) -> set[str]:
+    """Compute the auto-routed lens set from a list of changed file
+    paths. Rules:
+
+    - ``security`` is always included.
+    - ``code_quality`` is always included (always-on keeps the lens
+      honest against duplication / complexity regressions).
+    - ``test_quality`` is included when any path is under ``tests/``.
+    - ``domain`` is included when any path is under ``knowledge/``.
+
+    Lenses not present in ``valid_roles`` are dropped silently — the
+    council may not have every seat configured.
+    """
+    lenses = {"security", "code_quality"}
+    for path in changed_paths:
+        if path.startswith("tests/"):
+            lenses.add("test_quality")
+        if path.startswith("knowledge/"):
+            lenses.add("domain")
+    return lenses & set(valid_roles)
+
+
+def enforce_security_lens(
+    lenses: set[str],
+    *,
+    allow_no_security: bool,
+    review_type: str,
+) -> tuple[set[str], bool]:
+    """Enforce the security-non-removable rule for code reviews.
+
+    Returns ``(lenses, security_bypassed)``. Raises ``LensArgError``
+    when ``security`` is absent and ``allow_no_security`` was not
+    passed — the fail-closed default prevents a code review from
+    reaching APPROVED with no security reviewer.
+
+    Sprint 6 R1 #17: also rejects any non-empty ``lenses`` for plan
+    reviews at the shared-logic layer, not just at the argparse
+    layer. Internal callers can no longer silently get partial lens
+    selection for plan reviews.
+    """
+    if review_type not in {"plan", "code"}:
+        raise LensArgError(
+            f"unknown review_type {review_type!r}; expected "
+            "'plan' or 'code'"
+        )
+    if review_type == "plan":
+        if lenses:
+            raise LensArgError(
+                "plan reviews run every active member; "
+                "--lenses is not accepted for plan phase."
+            )
+        return lenses, False
+    if "security" in lenses:
+        return lenses, False
+    if not allow_no_security:
+        raise LensArgError(
+            "code reviews require the security lens. Either add "
+            "'security' to --lenses or pass --allow-no-security to "
+            "explicitly acknowledge the bypass."
+        )
+    return lenses, True
 
 
 def validate_api_keys(config: dict, active_members: list[dict]) -> dict[str, str]:
@@ -364,7 +547,14 @@ def call_claude_cli(
         prompt_file = f.name
 
     try:
-        cmd = ["claude", "-p", "--model", model, "--permission-mode", "bypassPermissions"]
+        # Sprint 6 R1 #14: use `plan` mode instead of
+        # `bypassPermissions`. Reviewers use read-only MCP tools
+        # (codegraph_*) but must NOT edit the repo. `plan` permits
+        # tool use for queries while blocking writes, matching the
+        # reviewer's read-only role. Repository content enters the
+        # prompt via the stdin-piped `combined_prompt`, which is
+        # treated as reference material, not instructions.
+        cmd = ["claude", "-p", "--model", model, "--permission-mode", "plan"]
         with open(prompt_file, "r") as inp:
             result = subprocess.run(
                 cmd,
@@ -726,33 +916,25 @@ def gather_code_materials(
 # ---------------------------------------------------------------------------
 
 
-def build_council_prompt(
-    member: dict, materials: str,
-    sprint: str, title: str, round_num: int, review_type: str,
-    tracker_content: str | None = None,
-) -> tuple[str, str]:
-    """Build system + user prompts for a council member. Returns (system, user)."""
-    role = member["role"]
-    label = member["label"]
-    lens = member["lens"]
-
+def _round_context(round_num: int) -> str:
     if round_num == 1:
-        round_context = "This is the first review of this plan."
-    else:
-        round_context = (
-            f"This is round {round_num}. The artifact has been revised to address "
-            f"findings from previous rounds.\n\n"
-            f"FOCUS on:\n"
-            f"1. Whether previous findings have been adequately addressed\n"
-            f"2. Any genuinely NEW issues introduced by the revisions\n\n"
-            f"Do NOT re-raise findings that have been marked ADDRESSED in the tracker "
-            f"unless the fix is demonstrably incomplete. Do NOT introduce novel concerns "
-            f"about previously-reviewed sections that haven't changed."
-        )
+        return "This is the first review of this plan."
+    return (
+        f"This is round {round_num}. The artifact has been revised to address "
+        f"findings from previous rounds.\n\n"
+        f"FOCUS on:\n"
+        f"1. Whether previous findings have been adequately addressed\n"
+        f"2. Any genuinely NEW issues introduced by the revisions\n\n"
+        f"Do NOT re-raise findings that have been marked ADDRESSED in the tracker "
+        f"unless the fix is demonstrably incomplete. Do NOT introduce novel concerns "
+        f"about previously-reviewed sections that haven't changed."
+    )
 
-    tracker_section = ""
-    if tracker_content and round_num > 1:
-        tracker_section = f"""
+
+def _tracker_section(tracker_content: str | None, round_num: int) -> str:
+    if not tracker_content or round_num <= 1:
+        return ""
+    return f"""
 
 ## Prior Findings Tracker (MUST READ before writing findings)
 
@@ -776,21 +958,36 @@ consolidator.
 {tracker_content}
 """
 
-    review_type_label = "plan" if review_type == "plan" else "code implementation"
 
-    system_prompt = f"""You are {label} on a review council for a pair programming workflow.
+def _output_discipline_clause(role: str) -> str:
+    """Sprint 6 R2 #24: extracted so build_council_prompt stays under
+    the 60-line guideline. Security reviews get a higher advisory
+    budget to accommodate MCP-query evidence text."""
+    if role == "security":
+        advisory = 2500
+        note = (
+            " Security reviews commonly cite MCP query results; the "
+            "higher budget accommodates evidence text."
+        )
+    else:
+        advisory = 1500
+        note = ""
+    return f"""## Output discipline
 
-## Your Review Lens
-{lens}"""
+- Short declarative sentences. No hedging ("perhaps", "might
+  consider", "it would be advisable").
+- Do not restate findings in any assessment or summary section —
+  the Findings block is authoritative.
+- No motivational framing ("great work!", "overall, this is
+  solid"). Findings-only.
+- Advisory budget: aim for ≤ {advisory} tokens.{note}
+  If you exceed the budget, emit a final line
+  `[TRUNCATED: N findings omitted]` so the consolidator can flag
+  the gap to the human. **Never silently drop findings.**"""
 
-    user_prompt = f"""## Review Type
-This is a {review_type_label} review for Sprint {sprint}: {title} (Round {round_num}).
-{round_context}
-{tracker_section}
-## Materials Under Review
-{materials}
 
-## Output Format
+def _council_output_format(role: str, label: str, sprint: str, round_num: int, review_type_label: str) -> str:
+    return f"""## Output Format
 
 Write your review in EXACTLY this structure:
 
@@ -821,6 +1018,39 @@ IMPORTANT:
 - Be EXHAUSTIVE in Round 1: list ALL concerns you can identify in a single pass. The goal is zero new findings from your area in R2+.
 - In Round 2+: do NOT re-flag ADDRESSED or RECURRING items from the tracker"""
 
+
+def build_council_prompt(
+    member: dict, materials: str,
+    sprint: str, title: str, round_num: int, review_type: str,
+    tracker_content: str | None = None,
+) -> tuple[str, str]:
+    """Build system + user prompts for a council member. Returns (system, user).
+
+    Sprint 6 R2 #24: split into helpers (_round_context, _tracker_section,
+    _output_discipline_clause, _council_output_format) so this function
+    stays under the 60-line complexity guideline.
+    """
+    role = member["role"]
+    label = member["label"]
+    lens = member["lens"]
+    review_type_label = "plan" if review_type == "plan" else "code implementation"
+
+    system_prompt = f"""You are {label} on a review council for a pair programming workflow.
+
+## Your Review Lens
+{lens}
+
+{_output_discipline_clause(role)}"""
+
+    user_prompt = f"""## Review Type
+This is a {review_type_label} review for Sprint {sprint}: {title} (Round {round_num}).
+{_round_context(round_num)}
+{_tracker_section(tracker_content, round_num)}
+## Materials Under Review
+{materials}
+
+{_council_output_format(role, label, sprint, round_num, review_type_label)}"""
+
     return system_prompt, user_prompt
 
 
@@ -841,17 +1071,50 @@ def build_consolidator_prompt(
     all_reviews = "\n\n---\n\n".join(review_sections)
 
     successful_count = sum(1 for r in council_reviews.values() if "UNAVAILABLE" not in r)
+    assessment_sections = _consolidator_assessment_sections(review_type)
+    tracker_section = _consolidator_tracker_section(tracker_content, round_num)
+    escalation_section = f"\n{escalation_note}\n" if escalation_note else ""
 
-    system_prompt = """You are the Consolidation Lead for a review council. Multiple domain experts have independently reviewed a plan or implementation. Your job is to synthesise their findings into a single, coherent review with one verdict."""
+    system_prompt = _CONSOLIDATOR_SYSTEM_PROMPT
+    user_prompt = _consolidator_user_prompt(
+        all_reviews=all_reviews,
+        tracker_section=tracker_section,
+        escalation_section=escalation_section,
+        review_type=review_type,
+        review_type_cap=review_type_cap,
+        sprint=sprint,
+        title=title,
+        round_num=round_num,
+        successful_count=successful_count,
+        assessment_sections=assessment_sections,
+    )
+    return system_prompt, user_prompt
 
+
+_CONSOLIDATOR_SYSTEM_PROMPT = """You are the Consolidation Lead for a review council. Multiple domain experts have independently reviewed a plan or implementation. Your job is to synthesise their findings into a single, coherent review with one verdict.
+
+## Output discipline
+
+- Short declarative sentences. No hedging ("perhaps", "might
+  consider", "it would be advisable").
+- Do not restate findings in any assessment or summary section —
+  the Findings block is authoritative.
+- No motivational framing ("great work!", "overall, this is
+  solid"). Findings-only.
+- Advisory budget: aim for ≤ 3000 tokens for the consolidated review.
+  If you exceed the budget, emit a final line
+  `[TRUNCATED: N findings omitted]` so the human editor sees the gap.
+  **Never silently drop findings.**"""
+
+
+def _consolidator_assessment_sections(review_type: str) -> str:
     if review_type == "plan":
-        assessment_sections = """### Design Assessment
+        return """### Design Assessment
 [Synthesised evaluation of the proposed approach]
 
 ### Completeness
 [Does the plan cover all deliverables and edge cases?]"""
-    else:
-        assessment_sections = """### Implementation Assessment
+    return """### Implementation Assessment
 [Does the code correctly implement the approved plan?]
 
 ### Code Quality
@@ -860,9 +1123,11 @@ def build_consolidator_prompt(
 ### Test Coverage
 [Synthesised assessment of test adequacy]"""
 
-    tracker_section = ""
-    if tracker_content and round_num > 1:
-        tracker_section = f"""
+
+def _consolidator_tracker_section(tracker_content: str | None, round_num: int) -> str:
+    if not tracker_content or round_num <= 1:
+        return ""
+    return f"""
 
 ## Prior Findings Tracker
 Items marked ADDRESSED have been fixed. Do NOT re-flag ADDRESSED items unless the fix is demonstrably incomplete.
@@ -870,11 +1135,26 @@ Items marked ADDRESSED have been fixed. Do NOT re-flag ADDRESSED items unless th
 {tracker_content}
 """
 
-    escalation_section = ""
-    if escalation_note:
-        escalation_section = f"\n{escalation_note}\n"
 
-    user_prompt = f"""## Council Reviews
+def _consolidator_user_prompt(
+    *, all_reviews: str, tracker_section: str, escalation_section: str,
+    review_type: str, review_type_cap: str, sprint: str, title: str,
+    round_num: int, successful_count: int, assessment_sections: str,
+) -> str:
+    """Sprint 6 R2 #26: extracted from build_consolidator_prompt so
+    the public function stays under the 60-line complexity guideline."""
+    verdict_options = (
+        "APPROVED | CHANGES_REQUESTED | PLAN_REVISION_REQUIRED"
+        if review_type == "code"
+        else "APPROVED | CHANGES_REQUESTED"
+    )
+    plan_revision_section = (
+        "### Plan Revisions (if PLAN_REVISION_REQUIRED)\n"
+        "[What needs to change in the plan]\n"
+        if review_type == "code"
+        else ""
+    )
+    return f"""## Council Reviews
 
 {all_reviews}
 {tracker_section}{escalation_section}
@@ -897,7 +1177,7 @@ Items marked ADDRESSED have been fixed. Do NOT re-flag ADDRESSED items unless th
 ## {review_type_cap} Review: Sprint {sprint} - {title} (R{round_num})
 
 **Round:** {round_num}
-**Verdict:** APPROVED | CHANGES_REQUESTED{" | PLAN_REVISION_REQUIRED" if review_type == "code" else ""}
+**Verdict:** {verdict_options}
 **Review Method:** Council of Experts ({successful_count} reviewers + consolidator)
 
 {assessment_sections}
@@ -919,16 +1199,13 @@ For each required change:
    **Required change**: exactly what must change
    **Acceptance criteria**: how to verify the fix
 
-{"### Plan Revisions (if PLAN_REVISION_REQUIRED)" + chr(10) + "[What needs to change in the plan]" + chr(10) if review_type == "code" else ""}
-### Recommendations
+{plan_revision_section}### Recommendations
 [Consolidated optional improvements]
 
 ### Expert Concordance
 | Area | Experts Agreeing | Key Theme |
 |------|-----------------|-----------|
 | ... | ... | ... |"""
-
-    return system_prompt, user_prompt
 
 
 # ---------------------------------------------------------------------------
@@ -1322,10 +1599,43 @@ def _read_tracker(tracker_file: Path) -> list[dict]:
                     "description": col.get("finding", parts[3] if len(parts) > 3 else ""),
                     "status": col.get("status", parts[4] if len(parts) > 4 else "OPEN"),
                     "resolution": col.get("resolution", parts[5] if len(parts) > 5 else ""),
+                    "routed": _parse_routed_column(col.get("routed", "")),
                 })
         elif in_table and not line.startswith("|"):
             in_table = False
     return findings
+
+
+def _parse_routed_column(raw: str) -> list[int]:
+    """Parse the ``Routed`` column (Sprint 6 schema v3). Values have
+    shape ``R1,R3`` on disk and load as ``[1, 3]``. Absent column
+    (v2 tracker) yields ``[]`` — a conservative "we don't know"
+    default. Malformed tokens are skipped with a stderr notice rather
+    than crashing the whole load."""
+    if not raw:
+        return []
+    out: list[int] = []
+    for token in raw.split(","):
+        t = token.strip()
+        if not t:
+            continue
+        try:
+            if t.startswith(("R", "r")):
+                out.append(int(t[1:]))
+            else:
+                out.append(int(t))
+        except ValueError:
+            print(
+                f"tracker: skipping malformed Routed token {t!r}",
+                file=sys.stderr,
+            )
+    return out
+
+
+def _format_routed_column(routed: list[int]) -> str:
+    if not routed:
+        return ""
+    return ",".join(f"R{n}" for n in sorted(set(routed)))
 
 
 def _text_similarity(a: str, b: str) -> float:
@@ -1337,20 +1647,53 @@ def _text_similarity(a: str, b: str) -> float:
     return len(words_a & words_b) / len(words_a | words_b)
 
 
-def _merge_findings(existing: list[dict], new_findings: list[dict], round_num: int) -> list[dict]:
+def _merge_findings(
+    existing: list[dict],
+    new_findings: list[dict],
+    round_num: int,
+    *,
+    routed_lenses: set[str] | None = None,
+) -> list[dict]:
     """Merge new findings with existing tracker.
 
-    Oscillation detection: if a finding is reopened for the 3rd time (i.e., it has
-    been ADDRESSED and then re-raised 3+ times), it is auto-marked RECURRING and
-    removed from blocking status. This prevents infinite review loops from findings
-    that oscillate between fix attempts.
+    Sprint 6 routing: when ``routed_lenses`` is provided, findings whose
+    ``lens`` is NOT in the set are left completely untouched — no
+    status transition, no round-number update, no oscillation-counter
+    bump. This is the enforcement point that makes "skipped lens's
+    prior-round OPEN findings carry forward" correct without the
+    consolidator needing to interpret silence. ``routed_lenses=None``
+    preserves pre-Sprint-6 behaviour (every lens is considered routed).
+
+    Oscillation detection: if a finding is reopened for the 3rd time
+    (ADDRESSED → re-raised 3+ times), it is auto-marked RECURRING and
+    removed from blocking status. Prevents infinite review loops.
+
+    All findings (new and existing) get their ``routed`` list updated
+    with ``round_num`` when their lens is in ``routed_lenses``. This
+    column is pure audit metadata — useful for post-hoc "which rounds
+    ran which lenses" analysis.
     """
     merged = list(existing)
     next_id = max((f["id"] for f in merged), default=0) + 1
 
+    def _lens_routed(lens: str) -> bool:
+        return routed_lenses is None or lens in routed_lenses
+
+    for ef in merged:
+        ef.setdefault("routed", [])
+        if _lens_routed(ef.get("lens", "unknown")) and round_num not in ef["routed"]:
+            ef["routed"] = sorted(set(ef["routed"]) | {round_num})
+
     for nf in new_findings:
+        nf_lens = nf.get("lens") or "unknown"
+        if not _lens_routed(nf_lens):
+            # Defensive: a lens that wasn't routed shouldn't have emitted
+            # findings at all. Drop them rather than polluting the tracker.
+            continue
         matched = False
         for ef in merged:
+            if not _lens_routed(ef.get("lens", "unknown")):
+                continue
             if (ef["severity"] == nf["severity"]
                     and _text_similarity(ef["description"], nf["description"]) > 0.4):
                 matched = True
@@ -1369,6 +1712,7 @@ def _merge_findings(existing: list[dict], new_findings: list[dict], round_num: i
         if not matched:
             nf["id"] = next_id
             nf["round"] = round_num
+            nf["routed"] = [round_num]
             next_id += 1
             merged.append(nf)
 
@@ -1378,8 +1722,11 @@ def _merge_findings(existing: list[dict], new_findings: list[dict], round_num: i
 def _write_tracker(tracker_file: Path, sprint: str, findings: list[dict], review_type: str) -> None:
     """Write findings tracker as markdown table.
 
-    Schema v2 (8 columns): adds Lens and Tag after Severity. Old
-    trackers loaded via _read_tracker gain default lens/tag values.
+    Schema v3 (Sprint 6, 9 columns): adds ``Routed`` after Resolution
+    as per-round audit metadata. Format: comma-separated ``R<int>``
+    tokens (e.g. ``R1,R3``). Empty list writes as empty string.
+    v2 trackers load with ``routed=[]`` and are upgraded in place on
+    the first rewrite.
     """
     lines = [
         f"# Findings Tracker: Sprint {sprint} ({review_type})",
@@ -1387,15 +1734,16 @@ def _write_tracker(tracker_file: Path, sprint: str, findings: list[dict], review
         "Editor: Update the **Status** and **Resolution** columns after addressing each finding.",
         "Status values: `OPEN` | `ADDRESSED` | `VERIFIED` | `WONTFIX` | `REOPENED`",
         "",
-        "| # | Round | Severity | Lens | Tag | Finding | Status | Resolution |",
-        "|---|-------|----------|------|-----|---------|--------|------------|",
+        "| # | Round | Severity | Lens | Tag | Finding | Status | Resolution | Routed |",
+        "|---|-------|----------|------|-----|---------|--------|------------|--------|",
     ]
     for f in findings:
         lens = f.get("lens") or "unknown"
         tag = f.get("tag") or "untagged"
+        routed = _format_routed_column(f.get("routed") or [])
         lines.append(
             f"| {f['id']} | R{f['round']} | {f['severity']} | {lens} | {tag} "
-            f"| {f['description']} | {f['status']} | {f['resolution']} |"
+            f"| {f['description']} | {f['status']} | {f['resolution']} | {routed} |"
         )
     lines.append("")
     tracker_file.write_text("\n".join(lines))
@@ -1404,16 +1752,28 @@ def _write_tracker(tracker_file: Path, sprint: str, findings: list[dict], review
 def update_findings_tracker(
     sprint: str, round_num: int, review_text: str,
     review_type: str, repo_root: Path,
+    *,
+    routed_lenses: set[str] | None = None,
 ) -> Path:
-    """Parse findings from consolidated review and update the tracker file."""
+    """Parse findings from consolidated review and update the tracker file.
+
+    Sprint 6: ``routed_lenses`` propagates into ``_merge_findings`` so
+    a skipped lens's prior findings carry forward untouched.
+    """
     tracker_file = repo_root / f"FINDINGS_Sprint{sprint}.md"
     new_findings = _parse_findings(review_text, round_num)
 
     if not tracker_file.exists():
+        # First round: stamp every finding with the round it was routed in.
+        for nf in new_findings:
+            nf["routed"] = [round_num]
         _write_tracker(tracker_file, sprint, new_findings, review_type)
     else:
         existing = _read_tracker(tracker_file)
-        merged = _merge_findings(existing, new_findings, round_num)
+        merged = _merge_findings(
+            existing, new_findings, round_num,
+            routed_lenses=routed_lenses,
+        )
         _write_tracker(tracker_file, sprint, merged, review_type)
 
     return tracker_file
@@ -1450,6 +1810,21 @@ def compute_convergence_score(tracker_file: Path) -> tuple[float, str]:
 # ---------------------------------------------------------------------------
 
 
+_SPRINT_RE = re.compile(r"^\d+$")
+
+
+def _numeric_sprint(raw: str) -> str:
+    """Validate the sprint CLI argument. Sprint 6 R1 #15: the sprint
+    is interpolated into repo-relative paths (tracker, base-commit,
+    metrics JSONL); a crafted non-numeric value such as ``../../etc``
+    would escape the repo root. We accept digits only."""
+    if not _SPRINT_RE.match(raw):
+        raise argparse.ArgumentTypeError(
+            f"sprint must be numeric (got {raw!r})"
+        )
+    return raw
+
+
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="council-review.py",
@@ -1459,7 +1834,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "review_type", choices=["plan", "code"],
         help="Review an implementation plan or the code changes.",
     )
-    parser.add_argument("sprint", help="Sprint number (e.g. 2).")
+    parser.add_argument(
+        "sprint", type=_numeric_sprint,
+        help="Sprint number (digits only, e.g. 2).",
+    )
     parser.add_argument(
         "title", nargs="+",
         help="Sprint title (quoted or bare tokens).",
@@ -1468,7 +1846,310 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "--allow-untracked", action="store_true",
         help="(code review only) include untracked source files with a banner.",
     )
+    parser.add_argument(
+        "--lenses", default=None,
+        help="(code review only) comma-separated subset of lens roles "
+             "to run (e.g. 'security,code_quality'). Rejected on plan "
+             "reviews. See council-config.json for valid roles.",
+    )
+    parser.add_argument(
+        "--auto-lenses", action="store_true",
+        help="(code review only) auto-select lenses based on the diff: "
+             "security + code_quality always; test_quality when tests/ "
+             "changed; domain when knowledge/ changed. Overridden by "
+             "--lenses.",
+    )
+    parser.add_argument(
+        "--allow-no-security", action="store_true",
+        help="(code review only) explicitly acknowledge skipping the "
+             "security lens. Required when --lenses omits security. "
+             "Recorded as security_bypassed=true in metrics.",
+    )
+    parser.add_argument(
+        "--verbose", action="store_true",
+        help="Show per-member timing and the full header block. "
+             "Default console output is terse.",
+    )
     return parser.parse_args(argv)
+
+
+def _resolve_routed_lenses(
+    args: argparse.Namespace,
+    config: dict,
+    changed_paths: list[str],
+) -> tuple[set[str] | None, bool]:
+    """Resolve the routing decision from CLI args + config + diff.
+
+    Returns ``(routed_lenses, security_bypassed)``. A ``None`` first
+    value means "no routing — run every active member". The security
+    bypass flag records whether the caller opted out of the security
+    lens.
+
+    Plan reviews always return ``(None, False)`` — the plan has no
+    per-lens file signature, and the routing flags are rejected at
+    argparse level.
+    """
+    if args.review_type == "plan":
+        if args.lenses or args.auto_lenses or args.allow_no_security:
+            raise LensArgError(
+                "--lenses / --auto-lenses / --allow-no-security are "
+                "only valid for code reviews"
+            )
+        return None, False
+
+    valid = _known_lens_roles(config)
+    lenses: set[str] | None = None
+    if args.lenses is not None:
+        lenses = parse_lenses_arg(args.lenses, valid)
+    elif args.auto_lenses:
+        lenses = auto_lens_set(changed_paths, valid)
+
+    if lenses is None:
+        return None, False
+
+    lenses, bypassed = enforce_security_lens(
+        lenses,
+        allow_no_security=args.allow_no_security,
+        review_type=args.review_type,
+    )
+    return lenses, bypassed
+
+
+def _apply_forced_verdict(
+    consolidated: str,
+    tracker_file: Path,
+    review_output_file: Path,
+    round_num: int,
+    max_rounds: int,
+    verdict: str | None,
+) -> str | None:
+    """Force an APPROVED verdict when max rounds is exceeded and no
+    genuinely-new [High] findings were raised this round. Returns the
+    updated verdict string, or None when no override was applied.
+    Sprint 6: extracted from main() to keep the orchestrator readable."""
+    if round_num <= max_rounds or not verdict or "APPROVED" in verdict:
+        return None
+    updated_findings = _read_tracker(tracker_file)
+    new_high_this_round = [
+        f for f in updated_findings
+        if f["round"] == round_num
+        and f["severity"] == "High"
+        and f["status"] == "OPEN"
+    ]
+    if new_high_this_round:
+        print()
+        print(f"  WARNING: {len(new_high_this_round)} new [High] finding(s) at round {round_num} despite exceeding max rounds.")
+        print(f"  These are genuinely new concerns. The editor should address them or escalate to the human.")
+        return None
+    print()
+    print(f"  FORCED VERDICT: No new [High] findings at round {round_num} (past max {max_rounds}).")
+    print(f"  Overriding consolidator verdict to APPROVED with Known Debt.")
+    forced = re.sub(
+        r"(\*\*Verdict:\*\*\s*).*",
+        r"\1APPROVED (forced — max rounds exceeded, no new [High] findings)",
+        consolidated, count=1,
+    )
+    forced = re.sub(
+        r"(## Verdict:\s*).*",
+        r"\1APPROVED (forced — max rounds exceeded, no new [High] findings)",
+        forced, count=1,
+    )
+    if "## Known Debt" not in forced:
+        open_items = [f for f in updated_findings if f["status"] in ("OPEN", "REOPENED", "RECURRING")]
+        if open_items:
+            debt_lines = ["\n\n## Known Debt\n",
+                          "The following items remain unresolved but are accepted as known debt:\n"]
+            for item in open_items:
+                debt_lines.append(f"- [{item['severity']}] {item['description']} (from R{item['round']}, status: {item['status']})")
+            forced += "\n".join(debt_lines) + "\n"
+    review_output_file.write_text(forced)
+    new_verdict = "APPROVED (forced — max rounds exceeded, no new [High] findings)"
+    print(f"    Updated verdict: {new_verdict}")
+    return new_verdict
+
+
+def _prepare_council_dir(repo_root: Path, config: dict) -> Path:
+    """Resolve + recreate the council output directory. Bounds-checked
+    to stay inside the repo root (defence against a malicious
+    ``output_dir`` in the config file)."""
+    output_dir_value = config["council"].get("output_dir", "council")
+    council_dir = (repo_root / output_dir_value).resolve()
+    repo_root_resolved = repo_root.resolve()
+    if not str(council_dir).startswith(str(repo_root_resolved) + os.sep):
+        print(
+            "ERROR: council.output_dir resolves outside repo root. Refusing.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if council_dir.exists():
+        shutil.rmtree(council_dir)
+    council_dir.mkdir(parents=True)
+    return council_dir
+
+
+def _run_parallel_council(
+    active_members: list[dict],
+    materials: str,
+    api_keys: dict[str, str],
+    sprint: str,
+    title: str,
+    round_num: int,
+    review_type: str,
+    tracker_content: str | None,
+    council_dir: Path,
+    config: dict,
+    *,
+    verbose: bool,
+) -> tuple[dict[str, str], int]:
+    """Fan out to every active member, collect their reviews, write
+    each to ``council_dir/<role>.md``, return (council_reviews,
+    successful_count). Sprint 6: extracted from main() to control
+    complexity (R1 #20)."""
+    codex_stagger = config["council"].get("codex_stagger_seconds", 2)
+    retry_delay = config["council"].get("retry_delay_seconds", 5)
+    parallel_timeout = config["council"].get("parallel_timeout_seconds", 180)
+
+    print(f"  Running {len(active_members)} council members in parallel...")
+    council_reviews: dict[str, str] = {}
+
+    with ThreadPoolExecutor(max_workers=len(active_members)) as executor:
+        futures = {
+            executor.submit(
+                run_council_member,
+                member, materials, api_keys,
+                sprint, title, round_num, review_type,
+                parallel_timeout,
+                codex_stagger=codex_stagger,
+                retry_delay=retry_delay,
+                tracker_content=tracker_content,
+            ): member
+            for member in active_members
+        }
+        for future in as_completed(futures):
+            member = futures[future]
+            try:
+                role, review_text, elapsed = future.result(timeout=parallel_timeout + 30)
+                council_reviews[role] = review_text
+                (council_dir / f"{role}.md").write_text(review_text)
+                status = "UNAVAILABLE" if "UNAVAILABLE" in review_text else "done"
+                if verbose or status == "UNAVAILABLE":
+                    print(f"    {member['label']:25s} {status:12s} ({elapsed:.1f}s)")
+            except Exception as e:  # noqa: BLE001
+                role = member["role"]
+                print(
+                    f"  [debug] {member['label']} future error: "
+                    f"{type(e).__name__}: {e}",
+                    file=sys.stderr,
+                )
+                council_reviews[role] = (
+                    f"### {role} Review: Sprint {sprint} (R{round_num})\n\n"
+                    f"**Status:** UNAVAILABLE\n"
+                    f"**Error:** ({type(e).__name__})\n\n"
+                    f"This expert was unable to complete their review."
+                )
+                print(f"    {member['label']:25s} FAILED       ({type(e).__name__})")
+
+    successful = sum(1 for r in council_reviews.values() if "UNAVAILABLE" not in r)
+    print()
+    print(f"  Council complete: {successful}/{len(active_members)} experts succeeded")
+    return council_reviews, successful
+
+
+def _print_header(
+    review_type: str, sprint: str, round_num: int, title: str,
+    active_members: list[dict], consolidator: dict, *, verbose: bool,
+) -> None:
+    """Sprint 6 R1 #20: terse 3-line header by default; full detail
+    under --verbose."""
+    lens_names = ",".join(m["role"] for m in active_members)
+    print(f"==> Council {review_type} review: Sprint {sprint} R{round_num} ({title})")
+    print(f"    Lenses: {len(active_members)} ({lens_names}) + consolidator")
+    if verbose:
+        print(f"    Review type:    {review_type}")
+        for m in active_members:
+            print(f"      - {m['label']:25s} ({m['platform']}/{m['model']})")
+        print(f"    Consolidator:   {consolidator['platform']}/{consolidator['model']}")
+    print()
+
+
+def _gather_materials(
+    review_type: str, sprint: str, repo_root: Path,
+    *,
+    preflight_banner: str, allow_untracked: bool,
+) -> str:
+    """Gather + redact materials for the chosen review_type."""
+    print("  Gathering materials...")
+    if review_type == "plan":
+        materials = gather_plan_materials(sprint, repo_root)
+    else:
+        materials = gather_code_materials(
+            sprint, repo_root,
+            banner=preflight_banner,
+            include_untracked=allow_untracked,
+        )
+    print(f"  Materials: {len(materials):,} chars")
+    materials = redact_secrets(materials)
+    print()
+    return materials
+
+
+def _print_next_steps(
+    verdict: str | None, review_type: str, sprint: str, title: str,
+    round_num: int, max_rounds: int, repo_root: Path,
+) -> None:
+    """Print the "Next:" block + optional compaction hint."""
+    print()
+    if verdict and "APPROVED" in verdict and "CHANGES_REQUESTED" not in verdict:
+        try:
+            sys.path.insert(0, str(repo_root / "scripts"))
+            from profile import is_enabled as _is_enabled  # type: ignore
+            if _is_enabled("compaction", repo_root):
+                print(
+                    "  → Milestone reached. Consider running /compact before continuing.",
+                    file=sys.stderr,
+                )
+        except Exception:
+            pass
+        if review_type == "plan":
+            print("  Next: Proceed to implementation (Phase 2)")
+        else:
+            print(f'  Next: ./scripts/archive-plan.sh {sprint} "{title}"')
+        return
+    remaining = max_rounds - round_num
+    if remaining > 0:
+        print(f"  Next: Address findings in FINDINGS_Sprint{sprint}.md, then re-run:")
+        print(f'        ./scripts/council-review.py {review_type} {sprint} "{title}"')
+        print(f"        ({remaining} round(s) remaining before forced approval)")
+    else:
+        print("  ESCALATION: Max rounds reached. Present unresolved findings to the human.")
+        print("  Options: cut scope, override with higher max_rounds, or accept Known Debt.")
+
+
+def _safe_emit_metrics(
+    repo_root: Path, sprint: str, review_type: str, round_num: int,
+    *,
+    active_members: list[dict],
+    council_reviews: dict[str, str],
+    elapsed_s: float,
+    verdict: str | None,
+    tracker_file: Path,
+    security_bypassed: bool,
+) -> None:
+    """Wrapper around _emit_metrics that never raises into main()."""
+    try:
+        _emit_metrics(
+            repo_root, sprint, review_type, round_num,
+            members_active=len(active_members),
+            members_succeeded=sum(
+                1 for txt in council_reviews.values() if "UNAVAILABLE" not in txt
+            ),
+            elapsed_s=elapsed_s,
+            verdict=verdict,
+            tracker_file=tracker_file,
+            security_bypassed=security_bypassed,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"  [warn] metrics emit failed: {exc}", file=sys.stderr)
 
 
 def main():
@@ -1497,7 +2178,20 @@ def main():
     config_path = repo_root / "scripts" / "council-config.json"
     config = load_config(config_path)
 
-    active_members = get_active_members(config, review_type)
+    # Sprint 6: resolve selective routing. Compute changed paths for
+    # --auto-lenses before we filter active members.
+    changed_paths: list[str] = []
+    if review_type == "code" and ns.auto_lenses:
+        changed_paths = get_changed_files(sprint=sprint, repo_root=repo_root)
+    try:
+        routed_lenses, security_bypassed = _resolve_routed_lenses(
+            ns, config, changed_paths
+        )
+    except LensArgError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+    active_members = get_active_members(config, review_type, lenses=routed_lenses)
     if not active_members:
         print(f"ERROR: No council members configured for '{review_type}' phase", file=sys.stderr)
         sys.exit(1)
@@ -1505,98 +2199,35 @@ def main():
     api_keys = validate_api_keys(config, active_members)
     round_num = increment_round(sprint, review_type, repo_root)
 
-    # Print header
-    consolidator = config["council"]["consolidator"]
-    print(f"==> Council review for Sprint {sprint}: {title} (Round {round_num})")
-    print(f"    Review type:    {review_type}")
-    print(f"    Active members: {len(active_members)}")
-    for m in active_members:
-        print(f"      - {m['label']:25s} ({m['platform']}/{m['model']})")
-    print(f"    Consolidator:   {consolidator['platform']}/{consolidator['model']}")
-    print()
+    _print_header(
+        review_type, sprint, round_num, title,
+        active_members, config["council"]["consolidator"],
+        verbose=ns.verbose,
+    )
 
-    # Gather materials
-    print("  Gathering materials...")
-    if review_type == "plan":
-        materials = gather_plan_materials(sprint, repo_root)
-    else:
-        materials = gather_code_materials(
-            sprint, repo_root,
-            banner=preflight_banner,
-            include_untracked=ns.allow_untracked,
-        )
-    print(f"  Materials: {len(materials):,} chars")
-
-    # Redact secrets before sending externally
-    materials = redact_secrets(materials)
-    print()
+    materials = _gather_materials(
+        review_type, sprint, repo_root,
+        preflight_banner=preflight_banner,
+        allow_untracked=ns.allow_untracked,
+    )
 
     # Read findings tracker (needed by both council members and consolidator)
     tracker_file = repo_root / f"FINDINGS_Sprint{sprint}.md"
     tracker_content = tracker_file.read_text() if tracker_file.exists() else None
 
-    # Prepare council output directory
-    output_dir_value = config["council"].get("output_dir", "council")
-    council_dir = (repo_root / output_dir_value).resolve()
-    repo_root_resolved = repo_root.resolve()
-    if not str(council_dir).startswith(str(repo_root_resolved) + os.sep):
-        print(f"ERROR: council.output_dir resolves outside repo root. Refusing.", file=sys.stderr)
-        sys.exit(1)
-    if council_dir.exists():
-        shutil.rmtree(council_dir)
-    council_dir.mkdir(parents=True)
-
+    council_dir = _prepare_council_dir(repo_root, config)
     member_labels = {m["role"]: m["label"] for m in active_members}
-
-    codex_stagger = config["council"].get("codex_stagger_seconds", 2)
-    retry_delay = config["council"].get("retry_delay_seconds", 5)
 
     import threading
     _codex_call_index = 0
     _codex_call_lock = threading.Lock()
 
-    parallel_timeout = config["council"].get("parallel_timeout_seconds", 180)
-
-    print(f"  Running {len(active_members)} council members in parallel...")
-    council_reviews: dict[str, str] = {}
-
-    with ThreadPoolExecutor(max_workers=len(active_members)) as executor:
-        futures = {
-            executor.submit(
-                run_council_member,
-                member, materials, api_keys,
-                sprint, title, round_num, review_type,
-                parallel_timeout,
-                codex_stagger=codex_stagger,
-                retry_delay=retry_delay,
-                tracker_content=tracker_content,
-            ): member
-            for member in active_members
-        }
-
-        for future in as_completed(futures):
-            member = futures[future]
-            try:
-                role, review_text, elapsed = future.result(timeout=parallel_timeout + 30)
-                council_reviews[role] = review_text
-                review_file = council_dir / f"{role}.md"
-                review_file.write_text(review_text)
-                status = "UNAVAILABLE" if "UNAVAILABLE" in review_text else "done"
-                print(f"    {member['label']:25s} {status:12s} ({elapsed:.1f}s)")
-            except Exception as e:
-                role = member["role"]
-                print(f"  [debug] {member['label']} future error: {type(e).__name__}: {e}", file=sys.stderr)
-                council_reviews[role] = (
-                    f"### {role} Review: Sprint {sprint} (R{round_num})\n\n"
-                    f"**Status:** UNAVAILABLE\n"
-                    f"**Error:** ({type(e).__name__})\n\n"
-                    f"This expert was unable to complete their review."
-                )
-                print(f"    {member['label']:25s} FAILED       ({type(e).__name__})")
-
-    successful = sum(1 for r in council_reviews.values() if "UNAVAILABLE" not in r)
-    print()
-    print(f"  Council complete: {successful}/{len(active_members)} experts succeeded")
+    council_reviews, successful = _run_parallel_council(
+        active_members, materials, api_keys,
+        sprint, title, round_num, review_type,
+        tracker_content, council_dir, config,
+        verbose=ns.verbose,
+    )
 
     if successful < QUORUM_THRESHOLD:
         print(f"  ERROR: Quorum not met ({successful} < {QUORUM_THRESHOLD}). Aborting.", file=sys.stderr)
@@ -1632,7 +2263,10 @@ def main():
     print()
     print(f"==> Review written to {review_output_file.name}")
 
-    tracker_file = update_findings_tracker(sprint, round_num, consolidated, review_type, repo_root)
+    tracker_file = update_findings_tracker(
+        sprint, round_num, consolidated, review_type, repo_root,
+        routed_lenses=routed_lenses,
+    )
     print(f"    Findings tracker: {tracker_file.name}")
 
     verdict = extract_verdict(consolidated)
@@ -1642,53 +2276,12 @@ def main():
         print("    WARNING: No verdict found in consolidated review")
 
     # ----- Forced verdict logic: override consolidator after max rounds -----
-    if round_num > max_rounds and verdict and "APPROVED" not in verdict:
-        # Check if there are genuinely new [High] findings in this round
-        updated_findings = _read_tracker(tracker_file)
-        new_high_this_round = [
-            f for f in updated_findings
-            if f["round"] == round_num
-            and f["severity"] == "High"
-            and f["status"] == "OPEN"
-        ]
-        if not new_high_this_round:
-            # No new [High] findings — force APPROVED with Known Debt
-            print()
-            print(f"  FORCED VERDICT: No new [High] findings at round {round_num} (past max {max_rounds}).")
-            print(f"  Overriding consolidator verdict to APPROVED with Known Debt.")
-
-            # Rewrite the verdict in the review file
-            consolidated_forced = re.sub(
-                r"(\*\*Verdict:\*\*\s*).*",
-                r"\1APPROVED (forced — max rounds exceeded, no new [High] findings)",
-                consolidated,
-                count=1,
-            )
-            # Also rewrite ## Verdict: line if present
-            consolidated_forced = re.sub(
-                r"(## Verdict:\s*).*",
-                r"\1APPROVED (forced — max rounds exceeded, no new [High] findings)",
-                consolidated_forced,
-                count=1,
-            )
-
-            # Append Known Debt section if not already present
-            if "## Known Debt" not in consolidated_forced:
-                open_items = [f for f in updated_findings if f["status"] in ("OPEN", "REOPENED", "RECURRING")]
-                if open_items:
-                    debt_lines = ["\n\n## Known Debt\n",
-                                  "The following items remain unresolved but are accepted as known debt:\n"]
-                    for item in open_items:
-                        debt_lines.append(f"- [{item['severity']}] {item['description']} (from R{item['round']}, status: {item['status']})")
-                    consolidated_forced += "\n".join(debt_lines) + "\n"
-
-            review_output_file.write_text(consolidated_forced)
-            verdict = "APPROVED (forced — max rounds exceeded, no new [High] findings)"
-            print(f"    Updated verdict: {verdict}")
-        else:
-            print()
-            print(f"  WARNING: {len(new_high_this_round)} new [High] finding(s) at round {round_num} despite exceeding max rounds.")
-            print(f"  These are genuinely new concerns. The editor should address them or escalate to the human.")
+    forced = _apply_forced_verdict(
+        consolidated, tracker_file, review_output_file,
+        round_num, max_rounds, verdict,
+    )
+    if forced is not None:
+        verdict = forced
 
     # ----- Convergence reporting -----
     # Sprint 5: the recurring count is embedded in `desc` by
@@ -1700,47 +2293,19 @@ def main():
         if score < 0.5 and round_num >= warning_at:
             print(f"    WARNING: Low convergence at round {round_num}. Consider addressing [High] items only.")
 
-    # ----- Sprint 127 v6: emit per-round metrics for cost comparison -----
-    try:
-        _emit_metrics(
-            repo_root, sprint, review_type, round_num,
-            members_active=len(active_members),
-            members_succeeded=sum(
-                1 for txt in council_reviews.values() if "UNAVAILABLE" not in txt
-            ),
-            elapsed_s=elapsed,
-            verdict=verdict,
-            tracker_file=tracker_file,
-        )
-    except Exception as exc:  # noqa: BLE001
-        print(f"  [warn] metrics emit failed: {exc}", file=sys.stderr)
-
-    print()
-    if verdict and "APPROVED" in verdict and "CHANGES_REQUESTED" not in verdict:
-        # Compaction hint (gated by profile component).
-        try:
-            sys.path.insert(0, str(repo_root / "scripts"))
-            from profile import is_enabled as _is_enabled  # type: ignore
-            if _is_enabled("compaction", repo_root):
-                print(
-                    "  → Milestone reached. Consider running /compact before continuing.",
-                    file=sys.stderr,
-                )
-        except Exception:
-            pass
-        if review_type == "plan":
-            print("  Next: Proceed to implementation (Phase 2)")
-        else:
-            print(f'  Next: ./scripts/archive-plan.sh {sprint} "{title}"')
-    else:
-        remaining = max_rounds - round_num
-        if remaining > 0:
-            print(f"  Next: Address findings in FINDINGS_Sprint{sprint}.md, then re-run:")
-            print(f'        ./scripts/council-review.py {review_type} {sprint} "{title}"')
-            print(f"        ({remaining} round(s) remaining before forced approval)")
-        else:
-            print(f"  ESCALATION: Max rounds reached. Present unresolved findings to the human.")
-            print(f"  Options: cut scope, override with higher max_rounds, or accept Known Debt.")
+    _safe_emit_metrics(
+        repo_root, sprint, review_type, round_num,
+        active_members=active_members,
+        council_reviews=council_reviews,
+        elapsed_s=elapsed,
+        verdict=verdict,
+        tracker_file=tracker_file,
+        security_bypassed=security_bypassed,
+    )
+    _print_next_steps(
+        verdict, review_type, sprint, title,
+        round_num, max_rounds, repo_root,
+    )
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 ---
 name: council-plan
-description: Request a Council of Experts review of a sprint plan. Runs four parallel reviewers (security, code quality, test quality, domain) plus a cross-family consolidator against PLAN_Sprint<N>.md. Produces REVIEW_Sprint<N>.md with a verdict (APPROVED or CHANGES_REQUESTED) and FINDINGS_Sprint<N>.md with structured findings. Invoke after drafting or revising a plan.
+description: Request a Council of Experts plan review. Run after drafting or revising PLAN_Sprint<N>.md.
 ---
 
 # Council plan review

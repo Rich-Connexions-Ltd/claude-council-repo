@@ -1,6 +1,6 @@
 ---
 name: council-code
-description: Request a Council of Experts review of sprint code changes. Runs four parallel reviewers plus consolidator against files changed since the plan was approved. Produces REVIEW_Sprint<N>.md and updates FINDINGS_Sprint<N>.md. Invoke after implementing the approved plan, before archival.
+description: Request a Council of Experts code review. Run after implementing the approved plan, before archival.
 ---
 
 # Council code review

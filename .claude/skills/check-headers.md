@@ -1,6 +1,6 @@
 ---
 name: check-headers
-description: Audit file-header convention compliance across the repo. Lints every source file for the Purpose/Role/Exports/Depends/Invariants/Last-updated block, and flags stale Last-updated lines that predate the current sprint. Invoke before archiving a sprint or when headers drift.
+description: Lint file-header blocks and flag stale Last-updated lines. Run before archiving a sprint.
 ---
 
 # Check headers

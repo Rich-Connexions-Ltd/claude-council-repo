@@ -18,7 +18,7 @@ Depends on:
   - internal: scripts/header_parser.py (parse_header for Sprint 125 index)
   - external: sqlite3, ast (stdlib only)
 
-Last updated: Sprint 125 (2026-04-13) -- added file_headers tables and drift-check subcommands
+Last updated: Sprint 6 (2026-04-16) -- --max-lines context-pack cap + render_context_table seam
 
 VVP Codebase Indexer -- builds a SQLite semantic map for Claude Code.
 
@@ -1378,16 +1378,78 @@ def _run_stale_depends() -> None:
 # CLI
 # ---------------------------------------------------------------------------
 
+DEFAULT_CONTEXT_MAX_LINES = 400
+
+
+def _parse_max_lines_arg(argv: list[str]) -> int:
+    """Parse ``--max-lines N`` (Sprint 6). Default 400. Zero or
+    negative values are rejected with exit 2 — truncation is always
+    at least 1 line deep."""
+    if "--max-lines" not in argv:
+        return DEFAULT_CONTEXT_MAX_LINES
+    i = argv.index("--max-lines")
+    if i + 1 >= len(argv):
+        print("--max-lines requires a positive integer", file=sys.stderr)
+        sys.exit(2)
+    try:
+        n = int(argv[i + 1])
+    except ValueError:
+        print(f"--max-lines must be an integer, got {argv[i + 1]!r}",
+              file=sys.stderr)
+        sys.exit(2)
+    if n <= 0:
+        print(f"--max-lines must be positive (got {n})", file=sys.stderr)
+        sys.exit(2)
+    return n
+
+
+def render_context_table(body: str, max_lines: int) -> str:
+    """Truncate the rendered context pack to ``max_lines`` lines.
+
+    Sprint 6 (R2 #13): extracted from the CLI branch so the boundary
+    behaviour is testable without subprocess / stdout capture.
+
+    - At the boundary (line count == max_lines): no marker appended.
+    - Above the boundary: keep the first ``max_lines`` lines and
+      append a single truncation notice line.
+    """
+    lines = body.splitlines()
+    if len(lines) <= max_lines:
+        return body
+    omitted = len(lines) - max_lines
+    head = "\n".join(lines[:max_lines])
+    marker = (
+        f"... ({omitted} line{'s' if omitted != 1 else ''} omitted; "
+        f"re-run with --max-lines N to see more)"
+    )
+    return head + "\n" + marker
+
+
 def main():
     if "--context-for" in sys.argv:
         ci = sys.argv.index("--context-for")
-        # Remaining args are file paths
-        file_paths = [a for a in sys.argv[ci + 1:] if not a.startswith("--")]
+        # Remaining args are file paths; skip flag tokens AND the
+        # immediate value of any value-taking flag (--max-lines).
+        tail = sys.argv[ci + 1:]
+        file_paths: list[str] = []
+        skip_next = False
+        for a in tail:
+            if skip_next:
+                skip_next = False
+                continue
+            if a == "--max-lines":
+                skip_next = True
+                continue
+            if a.startswith("--"):
+                continue
+            file_paths.append(a)
         if not file_paths:
             print("Usage: --context-for file1.py file2.py ...")
             sys.exit(1)
+        max_lines = _parse_max_lines_arg(sys.argv)
         idx = CodebaseIndexer(DB_PATH)
-        print(idx.generate_context(file_paths))
+        body = idx.generate_context(file_paths)
+        print(render_context_table(body, max_lines))
         idx.close()
         return
 

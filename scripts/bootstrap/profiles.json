@@ -19,7 +19,7 @@
       ]
     },
     "full": {
-      "description": "Everything in standard plus the advisory findings digest tool.",
+      "description": "Everything in standard plus the advisory findings digest + metrics digest tools.",
       "components": [
         "headers",
         "codegraph",
@@ -28,7 +28,8 @@
         "guardrails",
         "compaction",
         "findings_archive",
-        "digest"
+        "digest",
+        "metrics_digest"
       ]
     }
   }

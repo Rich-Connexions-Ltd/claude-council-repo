@@ -1,6 +1,6 @@
 ---
 name: sprint-complete
-description: Complete a sprint in the Claude-Council workflow. Updates SPRINTS.md, refreshes knowledge/, runs the header-staleness audit, reviews FINDINGS for council-process inefficiencies, runs the findings digest if the digest component is enabled, ensures all findings have a non-OPEN status, then archives the plan and prompts for commit. Invoke when the user says "Complete" or asks to wrap up the current sprint.
+description: Wrap up a sprint — update SPRINTS.md, audit headers, close findings, archive the plan. Run on "Complete".
 ---
 
 # Sprint complete

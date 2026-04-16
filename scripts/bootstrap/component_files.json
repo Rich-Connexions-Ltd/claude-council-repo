@@ -36,6 +36,9 @@
     },
     "digest": {
       "files": ["scripts/findings-digest.py"]
+    },
+    "metrics_digest": {
+      "files": ["scripts/council-metrics-digest.py"]
     }
   }
 }

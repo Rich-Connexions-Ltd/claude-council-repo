@@ -21,8 +21,18 @@ EXPECTED_COMPONENTS = {
     "standard": {"headers", "codegraph", "council", "skills", "guardrails",
                  "compaction", "findings_archive"},
     "full": {"headers", "codegraph", "council", "skills", "guardrails",
-             "compaction", "findings_archive", "digest"},
+             "compaction", "findings_archive", "digest", "metrics_digest"},
 }
+
+
+def test_metrics_digest_only_in_full_profile():
+    """Sprint 6 R2 #25: metrics_digest (scripts/council-metrics-digest.py)
+    is full-only — the feature is advisory and not worth carrying in
+    minimal/standard. Regression guard for the profile gating."""
+    data = json.loads((REPO_ROOT / "scripts" / "bootstrap" / "profiles.json").read_text())
+    assert "metrics_digest" in data["profiles"]["full"]["components"]
+    assert "metrics_digest" not in data["profiles"]["standard"]["components"]
+    assert "metrics_digest" not in data["profiles"]["minimal"]["components"]
 
 
 def test_profiles_json_matches_plan_matrix():

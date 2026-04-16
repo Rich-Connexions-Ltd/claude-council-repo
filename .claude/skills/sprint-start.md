@@ -1,6 +1,6 @@
 ---
 name: sprint-start
-description: Start a sprint in the Claude-Council workflow. Reads SPRINTS.md for the current sprint's goal and deliverables, runs the codegraph incremental index, pulls a context pack for the key files, and drafts PLAN_Sprint<N>.md with the mandatory Test Strategy section. Invoke when the user says "Sprint N" or asks to begin a new sprint.
+description: Start a sprint — read SPRINTS.md, refresh codegraph, draft PLAN_Sprint<N>.md. Run on "Sprint N".
 ---
 
 # Sprint start

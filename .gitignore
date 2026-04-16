@@ -61,6 +61,8 @@ htmlcov/
 
 # Generated digest output + per-sprint findings archive (runtime state)
 Documentation/FINDINGS_DIGEST.md
+Documentation/COUNCIL_METRICS_DIGEST.md
+Documentation/TOKEN_AUDIT.md
 Documentation/findings-archive/
 
 # Pair programming working files (transient, per-sprint)

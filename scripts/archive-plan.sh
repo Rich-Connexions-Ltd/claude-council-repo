@@ -18,12 +18,23 @@
 # Example:
 #   ./scripts/archive-plan.sh 35 "Credential Issuance"
 #
-# Last updated: Sprint 1 (2026-04-15) -- findings archive + compaction hint + arg validation
+# Last updated: Sprint 6 (2026-04-16) -- terse 3-line default, --verbose restores detail
 
 set -euo pipefail
 
+VERBOSE=0
+args=()
+for arg in "$@"; do
+    if [ "$arg" = "--verbose" ]; then
+        VERBOSE=1
+    else
+        args+=("$arg")
+    fi
+done
+set -- "${args[@]}"
+
 if [ $# -lt 2 ]; then
-    echo "Usage: $0 <sprint-number> <title>"
+    echo "Usage: $0 [--verbose] <sprint-number> <title>"
     echo "Example: $0 35 \"Credential Issuance\""
     exit 1
 fi
@@ -145,19 +156,21 @@ for rf in "$PLAN_ROUND_FILE" "$CODE_ROUND_FILE" "$BASE_COMMIT_FILE" "$FINDINGS_F
 done
 
 # --- Step 4: Remind about CHANGES.md ---
+#
+# Sprint 6: terse 3-line default. --verbose restores the full list.
 
 echo ""
-echo "==> Archival complete for Sprint ${SPRINT_NUM}: ${TITLE}"
-echo ""
-echo "Remaining manual step:"
-echo "  - Update CHANGES.md with the sprint summary, files changed, and commit SHA"
-echo "  - Then commit all documentation changes"
-echo ""
-echo "Files modified:"
-echo "  - Documentation/PLAN_history.md  (appended)"
-echo "  - Documentation/archive/PLAN_Sprint${SPRINT_NUM}.md  (created)"
-echo "  - $PLAN_BASENAME  (removed)"
-[ "$REVIEW_REMOVED" = "1" ] && echo "  - $REVIEW_BASENAME  (removed)"
+echo "==> Archived Sprint ${SPRINT_NUM}: ${TITLE}"
+echo "    Next: update CHANGES.md with summary + commit SHA, then commit docs."
+
+if [ "$VERBOSE" = "1" ]; then
+    echo ""
+    echo "Files modified:"
+    echo "  - Documentation/PLAN_history.md  (appended)"
+    echo "  - Documentation/archive/PLAN_Sprint${SPRINT_NUM}.md  (created)"
+    echo "  - $PLAN_BASENAME  (removed)"
+    [ "$REVIEW_REMOVED" = "1" ] && echo "  - $REVIEW_BASENAME  (removed)"
+fi
 
 # Compaction hint (gated by profile component).
 if python3 "$REPO_ROOT/scripts/profile.py" is-enabled compaction >/dev/null 2>&1; then
