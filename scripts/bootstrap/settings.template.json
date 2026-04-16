@@ -1,0 +1,31 @@
+{
+  "_comment": "Template for .claude/settings.json. Bootstrap emits a subset of hooks based on the active profile. Entries whose _component key is not enabled are dropped before write.",
+  "enabledMcpjsonServers": ["codegraph"],
+  "enableAllProjectMcpServers": true,
+  "hooks": {
+    "PreToolUse": [
+      {
+        "_component": "guardrails",
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $CLAUDE_PROJECT_DIR/scripts/hooks/guardrails.py"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "_component": "headers",
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $CLAUDE_PROJECT_DIR/scripts/bump-header.py"
+          }
+        ]
+      }
+    ]
+  }
+}

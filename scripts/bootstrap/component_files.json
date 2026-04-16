@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "_comment": "Maps each component to the repo-relative files that bootstrap removes when that component is NOT enabled for the chosen profile. Paths MUST be repo-relative and repo-contained; bootstrap bounds-checks via Path.resolve().is_relative_to(repo_root) before unlink.",
+  "components": {
+    "headers": {
+      "files": ["scripts/check-headers.py", "scripts/header_parser.py", "scripts/bump-header.py"]
+    },
+    "codegraph": {
+      "files": ["scripts/index-codebase.py", "scripts/indexers", "scripts/mcp_codegraph_server.py", "scripts/run-mcp-server.sh", ".mcp.json"]
+    },
+    "council": {
+      "files": [
+        "scripts/council-review.py",
+        "scripts/council-config.json",
+        "scripts/council-check.sh",
+        "scripts/process-test.py",
+        ".claude/skills/council-plan.md",
+        ".claude/skills/council-code.md"
+      ]
+    },
+    "skills": {
+      "files": [
+        ".claude/skills/sprint-start.md",
+        ".claude/skills/sprint-complete.md",
+        ".claude/skills/check-headers.md"
+      ]
+    },
+    "guardrails": {
+      "files": ["scripts/hooks/guardrails.py"]
+    },
+    "compaction": {
+      "files": []
+    },
+    "findings_archive": {
+      "files": []
+    },
+    "digest": {
+      "files": ["scripts/findings-digest.py"]
+    }
+  }
+}

@@ -1,0 +1,97 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Node
+node_modules/
+
+# Rust
+target/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Caches
+.mypy_cache/
+.ruff_cache/
+
+# Claude Code (keep .claude/settings.json and template-owned skill files tracked)
+.claude/codebase.db
+.claude/codebase.db-*
+.claude/settings.local.json
+.claude/skills/*
+!.claude/skills/*.md
+.claude/worktrees/
+
+# Generated digest output + per-sprint findings archive (runtime state)
+Documentation/FINDINGS_DIGEST.md
+Documentation/findings-archive/
+
+# Pair programming working files (transient, per-sprint)
+PLAN_Sprint*.md
+REVIEW_Sprint*.md
+FINDINGS_Sprint*.md
+# ...except archived plans, which are deliberately tracked as history
+!Documentation/archive/PLAN_Sprint*.md
+.review-round-*
+.sprint-base-commit-*
+
+# Generated context packs (transient)
+codex/context/
+
+# Council review working files (transient)
+council/
+
+# Logs
+*_debug.log
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+~$*
+
+# Secrets
+**/dev-keys.txt
+**/api_keys.local.json
+*.pem
+*.key
+
+# Current sprint marker (per-machine, transient)
+.current-sprint

@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "default": "standard",
+  "profiles": {
+    "minimal": {
+      "description": "Headers + codegraph only. No council, no skills, no hooks beyond bump-header.",
+      "components": ["headers", "codegraph"]
+    },
+    "standard": {
+      "description": "Adds council review, skills surface, guardrails, compaction hints, findings archive.",
+      "components": [
+        "headers",
+        "codegraph",
+        "council",
+        "skills",
+        "guardrails",
+        "compaction",
+        "findings_archive"
+      ]
+    },
+    "full": {
+      "description": "Everything in standard plus the advisory findings digest tool.",
+      "components": [
+        "headers",
+        "codegraph",
+        "council",
+        "skills",
+        "guardrails",
+        "compaction",
+        "findings_archive",
+        "digest"
+      ]
+    }
+  }
+}
