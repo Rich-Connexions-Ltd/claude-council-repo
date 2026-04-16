@@ -19,7 +19,7 @@ Invariants & gotchas:
   - _ANSWERS is a module global; tests set it via monkeypatch so state
     doesn't leak between tests.
 
-Last updated: Sprint 5 (2026-04-16) -- initial coverage.
+Last updated: Sprint 7 (2026-04-16) -- step6 library-selection path tests (library pick, skip, generate fallback).
 """
 
 from __future__ import annotations
@@ -345,3 +345,116 @@ def test_ask_wrong_type_raises(bs, set_answers):
     set_answers({"identity.project_name": 42})
     with pytest.raises(bs.AnswersFileKeyMissing):
         bs.ask("x", prompt_id="identity.project_name")
+
+
+# ---------------------------------------------------------------------------
+# Sprint 7: step6 library-selection path
+# ---------------------------------------------------------------------------
+
+
+def test_step6_library_skip_when_council_disabled(bs, tmp_repo, set_answers):
+    """Step 6 is a no-op when council_enabled is False."""
+    ctx = {"council_enabled": False}
+    bs.step6_domain_expert(ctx)
+    # Should not have touched anything; no exceptions.
+
+
+def _stage_council_config(tmp_repo):
+    """Helper: seed a minimal council-config.json the step6 library
+    path can mutate."""
+    cfg = tmp_repo / "scripts" / "council-config.json"
+    cfg.parent.mkdir(exist_ok=True)
+    import json as _json
+    cfg.write_text(_json.dumps({
+        "council": {
+            "members": [
+                {"role": "domain", "lens": "PLACEHOLDER"},
+                {"role": "security", "lens": "sec lens"},
+            ]
+        }
+    }, indent=2))
+    return cfg
+
+
+def _stage_library(tmp_repo, bs, monkeypatch):
+    """Copy the real library into tmp_repo/scripts/bootstrap/domain-experts/
+    and point PROMPTS_DIR at it. The tmp_repo fixture already
+    monkeypatched PROMPTS_DIR; we re-stage from REPO_ROOT (the actual
+    checkout) so the source lookup succeeds."""
+    import shutil as _shutil
+    src = REPO_ROOT / "scripts" / "bootstrap" / "domain-experts"
+    dst = tmp_repo / "scripts" / "bootstrap" / "domain-experts"
+    if dst.exists():
+        _shutil.rmtree(dst)
+    _shutil.copytree(src, dst)
+    monkeypatch.setattr(bs, "PROMPTS_DIR", tmp_repo / "scripts" / "bootstrap")
+
+
+def test_step6_library_pick_writes_lens(
+    bs, tmp_repo, set_answers, monkeypatch
+):
+    """Pick a library entry and verify council-config.json's domain
+    member gets the picked lens."""
+    _stage_library(tmp_repo, bs, monkeypatch)
+    cfg = _stage_council_config(tmp_repo)
+    library = bs._load_domain_expert_library()
+    # Compose the exact option string step6 renders.
+    entry = next(e for e in library if e["slug"] == "backend-python")
+    choice_str = f"Library: {entry['name']} — {entry['summary']}"
+    set_answers({"council.domain_expert_choice": choice_str})
+    bs.step6_domain_expert({"council_enabled": True, "languages": ["python"]})
+    import json as _json
+    loaded = _json.loads(cfg.read_text())
+    domain = next(
+        m for m in loaded["council"]["members"] if m["role"] == "domain"
+    )
+    assert "PLACEHOLDER" not in domain["lens"]
+    assert len(domain["lens"].split()) >= 50
+
+
+def test_step6_skip_leaves_config_untouched(
+    bs, tmp_repo, set_answers, monkeypatch
+):
+    _stage_library(tmp_repo, bs, monkeypatch)
+    cfg = _stage_council_config(tmp_repo)
+    original = cfg.read_text()
+    set_answers({
+        "council.domain_expert_choice": "Skip — no domain expert for this project",
+    })
+    bs.step6_domain_expert({"council_enabled": True, "languages": ["python"]})
+    assert cfg.read_text() == original
+
+
+def test_step6_generate_path_invokes_claude_cli(
+    bs, tmp_repo, set_answers, monkeypatch
+):
+    """The 'Generate' branch still runs run_claude_cli. We mock it so
+    no subprocess fires; knowledge/ needs >=2 files to pass the
+    'too thin' gate."""
+    _stage_library(tmp_repo, bs, monkeypatch)
+    _stage_council_config(tmp_repo)
+    k = tmp_repo / "knowledge"
+    k.mkdir(exist_ok=True)
+    (k / "arch.md").write_text("# arch\n")
+    (k / "domain.md").write_text("# domain\n")
+    # Copy domain-expert-prompt.md into the staged prompts dir.
+    import shutil as _shutil
+    _shutil.copy2(
+        REPO_ROOT / "scripts" / "bootstrap" / "domain-expert-prompt.md",
+        tmp_repo / "scripts" / "bootstrap" / "domain-expert-prompt.md",
+    )
+    called: dict = {}
+
+    def fake_run(prompt, *, allow_edits=False, **kwargs):
+        called["invoked"] = True
+        called["allow_edits"] = allow_edits
+        return (True, "ok", "")
+
+    monkeypatch.setattr(bs, "run_claude_cli", fake_run)
+    set_answers({
+        "council.domain_expert_choice":
+            "Generate a custom lens from knowledge/ (uses claude CLI)",
+    })
+    bs.step6_domain_expert({"council_enabled": True, "languages": ["python"]})
+    assert called.get("invoked") is True
+    assert called.get("allow_edits") is True

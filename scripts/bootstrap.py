@@ -34,7 +34,7 @@ Invariants & gotchas:
     / `_validate_patch`). User confirms every disk write derived
     from Claude output.
 
-Last updated: Sprint 4 (2026-04-16) -- added --answers-file for deterministic non-interactive bootstrap (parity test, CI).
+Last updated: Sprint 7 (2026-04-16) -- domain-expert library + knowledge scaffold wiring; _load_domain_expert_library, _apply_library_lens, _scaffold_is_present.
 """
 
 from __future__ import annotations
@@ -769,11 +769,59 @@ def _apply_indexer_envelope(envelope: dict, slug: str) -> None:
             say(f"  ✓ applied patch to {target}", indent=1)
 
 
+_SCAFFOLD_SUBDIRS = ("architecture", "domain", "runbook", "decisions")
+
+
+def _scaffold_is_present() -> bool:
+    """True when all four Sprint-7 knowledge subdirs exist with their
+    seeded README files. The scaffold ships via the template; this
+    check just confirms the download hasn't been hand-stripped."""
+    k = REPO_ROOT / "knowledge"
+    return all((k / sub / "README.md").is_file() for sub in _SCAFFOLD_SUBDIRS)
+
+
+def _run_categorising_summariser() -> tuple[bool, str]:
+    """Sprint 7: use the classifier meta-prompt to route each
+    raw/ doc into the right subdir, then run the legacy summariser
+    on each subdir's inputs. The meta-prompt is passed to
+    run_claude_cli with `allow_edits=True` so Claude writes the
+    summaries directly.
+
+    Scope note: this wraps the legacy single-call path — we pass a
+    classifier-aware master prompt that lists all raw/ files and
+    asks Claude to produce per-subdir summaries in one pass.
+    End-to-end detection quality is measured in a later sprint once
+    real user corpora are available.
+    """
+    classifier = (PROMPTS_DIR / "classify-knowledge-prompt.md")
+    summariser = (PROMPTS_DIR / "summarize-knowledge-prompt.md")
+    if not classifier.is_file() or not summariser.is_file():
+        return False, "classifier or summariser meta-prompt missing"
+    # Compose a single prompt that references both.
+    composed = (
+        "You are running in categorising-summariser mode (Sprint 7).\n\n"
+        "Step 1: for each file under knowledge/raw/, decide which of "
+        f"{list(_SCAFFOLD_SUBDIRS)} it belongs to. Use this classifier "
+        "meta-prompt as your rule set:\n\n"
+        f"{classifier.read_text(encoding='utf-8')}\n\n"
+        "Step 2: produce one summary file per target subdir under "
+        "knowledge/<subdir>/, following the style rules in:\n\n"
+        f"{summariser.read_text(encoding='utf-8')}\n"
+    )
+    return run_claude_cli(composed, allow_edits=True)[:2]
+
+
 def step3_knowledge(ctx: dict) -> None:
     hr("Step 3 — Knowledge base seeding")
     raw_dir = REPO_ROOT / "knowledge" / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
     say(f"Drop any domain docs (.pdf/.md/.txt/.docx) into: {raw_dir}")
+    if _scaffold_is_present():
+        say(
+            "  (scaffold present: architecture/, domain/, runbook/, "
+            "decisions/ — the summariser will route uploads by "
+            "dimension)", indent=1,
+        )
     if not ask_yes_no(
         "Have you placed files there (or want to seed from existing content)?",
         default=False,
@@ -794,11 +842,18 @@ def step3_knowledge(ctx: dict) -> None:
     ):
         ctx["knowledge_seeded"] = False
         return
-    prompt = (PROMPTS_DIR / "summarize-knowledge-prompt.md").read_text(encoding="utf-8")
-    ok, out, err = run_claude_cli(prompt, allow_edits=True)
-    say(f"  {'✓' if ok else '✗'} knowledge summariser ({'success' if ok else 'failed'})", indent=1)
-    if not ok and err:
-        say(f"    {err[:500]}", indent=1)
+    if _scaffold_is_present():
+        ok, out = _run_categorising_summariser()
+        label = "categorising knowledge summariser"
+    else:
+        prompt = (PROMPTS_DIR / "summarize-knowledge-prompt.md").read_text(encoding="utf-8")
+        ok, out, _err = run_claude_cli(prompt, allow_edits=True)
+        label = "knowledge summariser"
+    say(
+        f"  {'✓' if ok else '✗'} {label} "
+        f"({'success' if ok else 'failed'})",
+        indent=1,
+    )
     ctx["knowledge_seeded"] = ok
 
 
@@ -931,20 +986,173 @@ def step5_council(ctx: dict) -> None:
             say(f"    - {m}", indent=1)
 
 
+_LIBRARY_DIR_NAME = "domain-experts"
+
+
+def _load_domain_expert_library() -> list[dict]:
+    """Scan scripts/bootstrap/domain-experts/ for library entries.
+
+    Each entry is a dict with keys: slug, name, stacks (list[str]),
+    summary, path. The lens body is loaded on demand by
+    _extract_lens_description to keep this cheap.
+    """
+    lib_dir = PROMPTS_DIR / _LIBRARY_DIR_NAME
+    if not lib_dir.is_dir():
+        return []
+    entries: list[dict] = []
+    for path in sorted(lib_dir.glob("*.md")):
+        meta = _parse_library_frontmatter(path)
+        if meta is None:
+            continue
+        meta["path"] = path
+        entries.append(meta)
+    return entries
+
+
+def _parse_library_frontmatter(path: Path) -> dict | None:
+    """Return the YAML-ish frontmatter as a dict, or None on malformed
+    files. We use a minimal parser (not PyYAML) to avoid adding a
+    pip dependency — the grammar is constrained enough that split()
+    suffices."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    lines = text.splitlines()
+    try:
+        start = lines.index("---")
+        end = lines.index("---", start + 1)
+    except ValueError:
+        return None
+    meta: dict = {}
+    for line in lines[start + 1:end]:
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        key = key.strip()
+        value = value.strip()
+        if value.startswith("[") and value.endswith("]"):
+            inner = value[1:-1].strip()
+            meta[key] = [
+                t.strip().strip("'").strip('"')
+                for t in inner.split(",") if t.strip()
+            ]
+        else:
+            meta[key] = value
+    required = {"name", "slug", "stacks", "summary"}
+    if not required.issubset(meta.keys()):
+        return None
+    return meta
+
+
+def _extract_lens_description(path: Path) -> str | None:
+    """Extract the body of the ``## Lens description`` section from
+    a library file. Returns None if the section is missing."""
+    text = path.read_text(encoding="utf-8")
+    marker = "\n## Lens description\n"
+    idx = text.find(marker)
+    if idx < 0:
+        return None
+    start = idx + len(marker)
+    # Find the next top-level section.
+    next_section = text.find("\n## ", start)
+    body = text[start:next_section] if next_section >= 0 else text[start:]
+    return body.strip()
+
+
+def _apply_library_lens(entry: dict) -> tuple[bool, str]:
+    """Rewrite council-config.json's domain member's ``lens`` field
+    with the selected library entry. Returns (ok, message)."""
+    lens_body = _extract_lens_description(entry["path"])
+    if not lens_body:
+        return False, (
+            f"library entry {entry['slug']} is missing ## Lens description"
+        )
+    config_path = REPO_ROOT / "scripts" / "council-config.json"
+    if not config_path.exists():
+        return False, "council-config.json not found"
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return False, f"cannot parse council-config.json: {exc}"
+    members = config.get("council", {}).get("members", [])
+    target = next((m for m in members if m.get("role") == "domain"), None)
+    if target is None:
+        return False, "no 'domain' member in council-config.json"
+    target["lens"] = lens_body
+    config_path.write_text(
+        json.dumps(config, indent=2) + "\n", encoding="utf-8"
+    )
+    return True, f"applied library lens: {entry['name']}"
+
+
+def _recommend_library_entry(
+    library: list[dict], ctx: dict
+) -> dict | None:
+    """Pick a best-match entry based on the user's selected stack.
+    Returns None if no entry matches — caller falls back to asking
+    the user to choose."""
+    user_stacks = set(ctx.get("languages", []) + ctx.get("other_languages", []))
+    if not user_stacks:
+        return None
+    for entry in library:
+        entry_stacks = set(entry.get("stacks", []))
+        if user_stacks & entry_stacks:
+            return entry
+    return None
+
+
 def step6_domain_expert(ctx: dict) -> None:
+    """Sprint 7: offer three options — pick from library, generate a
+    custom lens, or skip. The library-pick path is deterministic (no
+    Claude CLI call); the generate path runs the existing meta-prompt."""
     if not ctx.get("council_enabled", False):
         return
     hr("Step 6 — Domain expert (optional)")
+
+    library = _load_domain_expert_library()
+    options: list[str] = []
+    for entry in library:
+        options.append(f"Library: {entry['name']} — {entry['summary']}")
+    options.append("Generate a custom lens from knowledge/ (uses claude CLI)")
+    options.append("Skip — no domain expert for this project")
+
+    default_idx = 1
+    if library:
+        rec = _recommend_library_entry(library, ctx)
+        if rec is not None:
+            default_idx = 1 + library.index(rec)
+            say(
+                f"  (recommended for {', '.join(rec['stacks'])}: "
+                f"{rec['name']})", indent=1,
+            )
+
+    choice = ask_choice(
+        "Domain Expert seat:",
+        options,
+        default=default_idx,
+        prompt_id="council.domain_expert_choice",
+    )
+
+    if choice.startswith("Library: "):
+        picked_name = choice[len("Library: "):].split(" — ")[0]
+        entry = next((e for e in library if e["name"] == picked_name), None)
+        if entry is None:
+            say("  (internal error: library entry vanished)", indent=1)
+            return
+        ok, message = _apply_library_lens(entry)
+        say(f"  {'✓' if ok else '✗'} {message}", indent=1)
+        return
+
+    if choice.startswith("Skip"):
+        say("  (skipped — edit council-config.json later if you want one)", indent=1)
+        return
+
+    # Generate path — existing flow.
     knowledge_dir = REPO_ROOT / "knowledge"
     k_files = [p for p in knowledge_dir.glob("*.md") if p.name != "README.md"]
     if len(k_files) < 2:
-        say("  (knowledge base too thin for a domain expert; skipping)", indent=1)
-        return
-    if not ask_yes_no(
-        "Add a Domain Expert council seat customised to your knowledge base?",
-        default=True,
-        prompt_id="council.add_domain_expert",
-    ):
+        say("  (knowledge base too thin for generator; skipping)", indent=1)
         return
     prompt = (PROMPTS_DIR / "domain-expert-prompt.md").read_text(encoding="utf-8")
     ok, out, err = run_claude_cli(prompt, allow_edits=True)
@@ -1043,7 +1251,15 @@ def apply_placeholders(ctx: dict) -> None:
         "SPRINT_1_DELIVERABLES": "",
         "SPRINT_1_EXIT_CRITERIA": "",
     }
-    for rel in ["CLAUDE.md", "SPRINTS.md", "CHANGES.md", "README.md"]:
+    targets = [
+        "CLAUDE.md", "SPRINTS.md", "CHANGES.md", "README.md",
+        # Sprint 7: knowledge/ scaffold READMEs are placeholder-templated.
+        "knowledge/architecture/README.md",
+        "knowledge/domain/README.md",
+        "knowledge/runbook/README.md",
+        "knowledge/decisions/README.md",
+    ]
+    for rel in targets:
         path = REPO_ROOT / rel
         if path.exists():
             replace_placeholders(path, mapping)
