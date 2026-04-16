@@ -1,5 +1,12 @@
 # Claude-Sprint Starter
 
+[![CI](https://github.com/Rich-Connexions-Ltd/claude-council-dev/actions/workflows/ci.yml/badge.svg)](https://github.com/Rich-Connexions-Ltd/claude-council-dev/actions/workflows/ci.yml)
+
+> *Using this template? Replace the badge URL above with your own repo
+> slug (`<org>/<repo>`) so the status reflects **your** CI. The
+> workflow file at `.github/workflows/ci.yml` ships with every
+> bootstrapped project.*
+
 A GitHub template for building software projects with:
 
 - **Council of Experts review** — four parallel LLM reviewers (Claude CLI

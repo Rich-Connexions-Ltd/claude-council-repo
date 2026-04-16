@@ -34,7 +34,7 @@ Invariants & gotchas:
 Related:
   - CLAUDE.md "File Header Blocks" -- the template and rules this enforces
 
-Last updated: Sprint 123 (2026-04-12) -- initial header lint script
+Last updated: Sprint 5 (2026-04-16) -- --changed-against fallback cascade for missing origin/main
 """
 
 from __future__ import annotations
@@ -219,6 +219,82 @@ def check_sprint_staleness(path: Path, current_sprint: str) -> HeaderIssue | Non
     return None
 
 
+DEFAULT_CHANGED_AGAINST = "origin/main"
+
+
+def _ref_exists(ref: str) -> bool:
+    """Return True if ``ref`` resolves to a commit in the local repo."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+        )
+    except (FileNotFoundError, OSError):
+        return False
+    return result.returncode == 0
+
+
+def _active_base_commit_refs() -> list[tuple[int, str]]:
+    """Collect (sprint_num, sha) pairs from any ``.sprint-base-commit-<N>``
+    files currently in the repo root. Archive-plan removes these on
+    sprint completion, so they reflect *active* sprint state. Returns
+    the list sorted by sprint number (highest first)."""
+    pairs: list[tuple[int, str]] = []
+    for p in REPO_ROOT.glob(".sprint-base-commit-*"):
+        suffix = p.name[len(".sprint-base-commit-"):]
+        if not suffix.isdigit():
+            continue
+        try:
+            sha = p.read_text().strip()
+        except OSError:
+            continue
+        if not sha:
+            continue
+        pairs.append((int(suffix), sha))
+    pairs.sort(key=lambda t: t[0], reverse=True)
+    return pairs
+
+
+def _iter_fallback_refs():
+    """Yield fallback refs in priority order for the
+    ``--changed-against`` cascade. Each yield is a human-readable
+    label + a ref string the caller can validate with ``_ref_exists``."""
+    for sprint, sha in _active_base_commit_refs():
+        yield (f"sprint {sprint} base commit", sha)
+    yield ("HEAD~1", "HEAD~1")
+
+
+def _resolve_changed_ref(
+    ref: str, *, arg_was_default: bool
+) -> str | None:
+    """Resolve ``ref`` to something ``git diff`` can use.
+
+    - If ``ref`` already resolves, return it unchanged.
+    - If it does not and the caller accepted the default (origin/main),
+      walk the fallback cascade and return the first ref that resolves.
+    - If it does not and the caller passed an explicit override, return
+      ``None`` (caller should signal an error — we don't silently
+      swap out a user-specified ref).
+    - If nothing in the cascade resolves either, return ``None`` and
+      the caller switches to full-scan-with-staleness-suppressed.
+    """
+    if _ref_exists(ref):
+        return ref
+    if not arg_was_default:
+        return None
+    for label, fallback in _iter_fallback_refs():
+        if _ref_exists(fallback):
+            print(
+                f"note: {ref} not found locally; falling back to "
+                f"{label} ({fallback}) for staleness diff.",
+                file=sys.stderr,
+            )
+            return fallback
+    return None
+
+
 def git_changed_files(ref: str) -> list[Path]:
     """Get the list of files changed since the given git ref."""
     try:
@@ -263,9 +339,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--changed-against",
-        default="origin/main",
+        default=DEFAULT_CHANGED_AGAINST,
         help="Git ref to diff against for the sprint staleness check "
-        "(default: origin/main).",
+        f"(default: {DEFAULT_CHANGED_AGAINST}). When the default is "
+        "used and the ref is missing (fresh clone, fork), check-headers "
+        "cascades through any active .sprint-base-commit-<N> markers "
+        "and then HEAD~1 before suppressing the staleness check.",
     )
     return parser
 
@@ -274,13 +353,40 @@ def collect_issues(
     source_files: list[Path],
     sprint: str | None,
     changed_against: str,
+    arg_was_default: bool = True,
 ) -> list[HeaderIssue]:
-    """Scan all source files and collect header issues."""
+    """Scan all source files and collect header issues.
+
+    Sprint 5: when a sprint is set, resolve ``changed_against`` through
+    the cascade so that a fresh clone or fork without ``origin/main``
+    still gets staleness coverage via sprint base commits or ``HEAD~1``.
+    If nothing resolves, we skip the staleness check with an explicit
+    notice rather than silently reporting no stale files.
+    """
     issues: list[HeaderIssue] = []
     for path in source_files:
         issues.extend(check_header(path))
     if sprint:
-        changed = git_changed_files(changed_against)
+        resolved = _resolve_changed_ref(
+            changed_against, arg_was_default=arg_was_default
+        )
+        if resolved is None:
+            if arg_was_default:
+                print(
+                    f"note: no usable ref for staleness diff "
+                    f"(tried {changed_against}, sprint base commits, "
+                    "HEAD~1). Skipping sprint staleness check.",
+                    file=sys.stderr,
+                )
+                return issues
+            print(
+                f"error: --changed-against {changed_against!r} does not "
+                "resolve. Aborting staleness check (refusing to silently "
+                "fall back when an explicit ref was provided).",
+                file=sys.stderr,
+            )
+            return issues
+        changed = git_changed_files(resolved)
         for path in changed:
             issue = check_sprint_staleness(path, sprint)
             if issue is not None:
@@ -325,9 +431,18 @@ def report_issues(
 
 def main() -> int:
     """CLI entry point -- parse args, run checks, report results."""
-    args = build_arg_parser().parse_args()
+    parser = build_arg_parser()
+    args = parser.parse_args()
+    arg_was_default = (
+        args.changed_against == parser.get_default("changed_against")
+    )
     source_files = iter_source_files()
-    issues = collect_issues(source_files, args.sprint, args.changed_against)
+    issues = collect_issues(
+        source_files,
+        args.sprint,
+        args.changed_against,
+        arg_was_default=arg_was_default,
+    )
     return report_issues(issues, len(source_files), args.strict)
 
 

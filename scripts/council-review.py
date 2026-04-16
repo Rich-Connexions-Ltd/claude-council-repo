@@ -19,7 +19,7 @@ Exports:
   - find_untracked_source_files, preflight_code_review,
     PreflightResult -- Sprint 2 pre-flight check surface
 
-Last updated: Sprint 2 (2026-04-16) -- pre-flight check, argparse migration
+Last updated: Sprint 5 (2026-04-16) -- call_codex tempfile removed; RECURRING surfaced in convergence reporting
 
 Council of Experts review system for pair programming workflow.
 
@@ -306,12 +306,16 @@ def call_codex(
     system: str, user_content: str, timeout: float,
     review_mode: bool = False,
 ) -> str:
-    """Call Codex CLI using account auth."""
-    combined_prompt = f"{system}\n\n---\n\n{user_content}"
+    """Call Codex CLI using account auth.
 
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
-        f.write(combined_prompt)
-        prompt_file = f.name
+    Sprint 5: previously wrote the combined prompt to a NamedTemporaryFile
+    that the subprocess never read (the prompt is piped via stdin via
+    ``input=``). Removing the tempfile eliminates a dead-code leak path
+    — if the write had raised, ``prompt_file`` would have been unbound
+    and the ``finally`` unlink would have masked the original error with
+    a NameError.
+    """
+    combined_prompt = f"{system}\n\n---\n\n{user_content}"
 
     try:
         # Always use 'codex exec --full-auto' — the 'codex review' subcommand
@@ -326,11 +330,6 @@ def call_codex(
         raise RuntimeError("Codex CLI not found. Install: npm install -g @openai/codex")
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"Codex timed out after {timeout:.0f}s")
-    finally:
-        try:
-            os.unlink(prompt_file)
-        except OSError:
-            pass
 
     if result.returncode != 0:
         stderr_first_line = (result.stderr or "").split("\n")[0][:120]
@@ -1421,7 +1420,14 @@ def update_findings_tracker(
 
 
 def compute_convergence_score(tracker_file: Path) -> tuple[float, str]:
-    """Compute convergence score from tracker."""
+    """Compute convergence score from tracker.
+
+    Sprint 5: surfaces RECURRING counts alongside resolved/open/reopened
+    so that the single-line convergence summary conveys oscillation
+    state without needing a separate print. The RECURRING clause is
+    appended only when the count is non-zero, keeping healthy-sprint
+    output terse.
+    """
     if not tracker_file.exists():
         return 0.0, "No tracker"
     findings = _read_tracker(tracker_file)
@@ -1431,8 +1437,11 @@ def compute_convergence_score(tracker_file: Path) -> tuple[float, str]:
     resolved = sum(1 for f in findings if f["status"] in ("ADDRESSED", "VERIFIED", "WONTFIX"))
     open_count = sum(1 for f in findings if f["status"] == "OPEN")
     reopened = sum(1 for f in findings if f["status"] == "REOPENED")
+    recurring = sum(1 for f in findings if f["status"] == "RECURRING")
     score = resolved / total if total > 0 else 1.0
     desc = f"{resolved}/{total} resolved, {open_count} open, {reopened} reopened"
+    if recurring:
+        desc += f", {recurring} recurring"
     return score, desc
 
 
@@ -1682,17 +1691,14 @@ def main():
             print(f"  These are genuinely new concerns. The editor should address them or escalate to the human.")
 
     # ----- Convergence reporting -----
+    # Sprint 5: the recurring count is embedded in `desc` by
+    # compute_convergence_score; the prior standalone "RECURRING: ..."
+    # print has been removed as redundant.
     if round_num > 1:
         score, desc = compute_convergence_score(tracker_file)
         print(f"    Convergence: {score:.0%} ({desc})")
         if score < 0.5 and round_num >= warning_at:
             print(f"    WARNING: Low convergence at round {round_num}. Consider addressing [High] items only.")
-
-    # ----- Check for oscillating findings -----
-    all_findings = _read_tracker(tracker_file)
-    recurring_count = sum(1 for f in all_findings if f["status"] == "RECURRING")
-    if recurring_count > 0:
-        print(f"    RECURRING: {recurring_count} finding(s) marked as oscillating Known Debt")
 
     # ----- Sprint 127 v6: emit per-round metrics for cost comparison -----
     try:

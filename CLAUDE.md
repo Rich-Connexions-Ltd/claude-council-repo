@@ -214,6 +214,21 @@ Config: `scripts/council-config.json`. Convergence guardrails: plan max
 5 rounds, code max 6 rounds. Each round emits metrics to
 `council/metrics_Sprint<N>.jsonl`.
 
+### Finding states
+
+Findings move through a small state machine:
+
+| State | Meaning |
+|---|---|
+| `OPEN` | Just raised; unaddressed. |
+| `ADDRESSED` | Editor claims the issue is fixed; next round will verify. |
+| `VERIFIED` | Reviewer confirmed the fix. |
+| `WONTFIX` | Accepted as out-of-scope with a resolution note. |
+| `REOPENED` | Editor marked ADDRESSED but a subsequent round re-raised it. |
+| `RECURRING` | ADDRESSED and re-raised **3+ times** — the merge logic auto-demotes it to Known Debt ("oscillating"). RECURRING findings stop blocking APPROVED and surface in the convergence summary (`X/Y resolved, Z open, W reopened, R recurring`) so a human can triage them out-of-band. |
+
+The oscillation demotion lives in `_merge_findings` (`scripts/council-review.py`). RECURRING is a terminal state — once tagged it stays tagged for the rest of the sprint.
+
 ## Permissions (pre-authorised)
 
 - `git`, `gh` — all operations.
