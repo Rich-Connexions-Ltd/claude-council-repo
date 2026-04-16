@@ -78,9 +78,14 @@ EXIT_PYTEST = 3
 
 
 def _load_publish_template_module():
-    spec = importlib.util.spec_from_file_location(
-        "_pt", REPO_ROOT / "scripts" / "publish-template.py"
-    )
+    """Try to import publish-template.py. Returns None when it isn't on
+    disk — this happens when the script runs from a bootstrapped /
+    template repo where publish-template.py is dev-tooling that
+    doesn't ship."""
+    pt_path = REPO_ROOT / "scripts" / "publish-template.py"
+    if not pt_path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location("_pt", pt_path)
     mod = importlib.util.module_from_spec(spec)
     # Register in sys.modules before exec so @dataclass can resolve
     # __module__ on the SyncResult class it defines.
@@ -89,23 +94,63 @@ def _load_publish_template_module():
     return mod
 
 
+_GITIGNORE_DIRS = {
+    ".git", ".venv", "venv", "node_modules", "__pycache__",
+    ".pytest_cache", ".mypy_cache", ".ruff_cache", ".claude",
+    "council", "Documentation",  # Documentation excluded: archive is huge
+}
+
+
+def _copy_current_repo(dest: Path) -> None:
+    """Copy the current repo (REPO_ROOT) into ``dest``, filtering out
+    git state, caches, and dev-container-only directories that a
+    freshly-bootstrapped project would never see."""
+    for item in REPO_ROOT.iterdir():
+        if item.name in _GITIGNORE_DIRS or item.name.startswith("."):
+            # Preserve .github, .mcp.json, .gitignore, .claude/skills
+            # but skip other dotfiles/dirs.
+            if item.name not in {".github", ".mcp.json", ".gitignore"}:
+                continue
+        dst = dest / item.name
+        if item.is_dir():
+            shutil.copytree(
+                item, dst,
+                ignore=shutil.ignore_patterns(
+                    "__pycache__", "*.pyc", ".pytest_cache", ".mypy_cache",
+                    ".ruff_cache", "worktrees",
+                ),
+            )
+        else:
+            shutil.copy2(item, dst)
+
+
 def build_virtual_template(dest: Path) -> None:
     """Copy the manifest-listed template surface into ``dest``, then
     git-init so the resulting repo matches what a downstream user sees
-    after ``gh repo create --template``."""
+    after ``gh repo create --template``.
+
+    When `publish-template.py` is present (dev-container), we use the
+    manifest to build the exact template surface. When it isn't
+    (running from the template itself, or a downstream project), we
+    copy the current repo minus caches — that IS the template surface
+    in those contexts.
+    """
     pt = _load_publish_template_module()
-    manifest = pt.load_manifest(MANIFEST_PATH)
-    pt.validate_manifest(manifest, REPO_ROOT)
-    for rel in pt.compute_file_list(manifest, REPO_ROOT):
-        src = REPO_ROOT / rel
-        dst = dest / rel
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dst)
-    for dest_rel, seed_rel in manifest["seeded_files"].items():
-        src = REPO_ROOT / seed_rel
-        dst = dest / dest_rel
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dst)
+    if pt is not None:
+        manifest = pt.load_manifest(MANIFEST_PATH)
+        pt.validate_manifest(manifest, REPO_ROOT)
+        for rel in pt.compute_file_list(manifest, REPO_ROOT):
+            src = REPO_ROOT / rel
+            dst = dest / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+        for dest_rel, seed_rel in manifest["seeded_files"].items():
+            src = REPO_ROOT / seed_rel
+            dst = dest / dest_rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+    else:
+        _copy_current_repo(dest)
 
     env = {
         **os.environ,
