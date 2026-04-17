@@ -7,7 +7,7 @@
       "components": ["headers", "codegraph"]
     },
     "standard": {
-      "description": "Adds council review, skills surface, guardrails, compaction hints, findings archive.",
+      "description": "Adds council review, skills surface, guardrails, compaction hints, findings archive, metrics digest.",
       "components": [
         "headers",
         "codegraph",
@@ -15,7 +15,8 @@
         "skills",
         "guardrails",
         "compaction",
-        "findings_archive"
+        "findings_archive",
+        "metrics_digest"
       ]
     },
     "full": {

@@ -19,19 +19,18 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 EXPECTED_COMPONENTS = {
     "minimal": {"headers", "codegraph"},
     "standard": {"headers", "codegraph", "council", "skills", "guardrails",
-                 "compaction", "findings_archive"},
+                 "compaction", "findings_archive", "metrics_digest"},
     "full": {"headers", "codegraph", "council", "skills", "guardrails",
              "compaction", "findings_archive", "digest", "metrics_digest"},
 }
 
 
-def test_metrics_digest_only_in_full_profile():
-    """Sprint 6 R2 #25: metrics_digest (scripts/council-metrics-digest.py)
-    is full-only — the feature is advisory and not worth carrying in
-    minimal/standard. Regression guard for the profile gating."""
+def test_metrics_digest_in_standard_and_full():
+    """metrics_digest is a read-only reporting tool any council user
+    wants. Available in standard + full, absent from minimal."""
     data = json.loads((REPO_ROOT / "scripts" / "bootstrap" / "profiles.json").read_text())
     assert "metrics_digest" in data["profiles"]["full"]["components"]
-    assert "metrics_digest" not in data["profiles"]["standard"]["components"]
+    assert "metrics_digest" in data["profiles"]["standard"]["components"]
     assert "metrics_digest" not in data["profiles"]["minimal"]["components"]
 
 
