@@ -1,5 +1,19 @@
 {
   "_comment": "Template for .claude/settings.json. Bootstrap emits a subset of hooks based on the active profile. Entries whose _component key is not enabled are dropped before write.",
+  "permissions": {
+    "allow": [
+      "Edit(file_path=PLAN_Sprint*)",
+      "Edit(file_path=REVIEW_Sprint*)",
+      "Edit(file_path=FINDINGS_Sprint*)",
+      "Edit(file_path=SPRINTS.md)",
+      "Edit(file_path=CHANGES.md)",
+      "Edit(file_path=CLAUDE.md)",
+      "Edit(file_path=Documentation/*)",
+      "Write(file_path=PLAN_Sprint*)",
+      "Write(file_path=REVIEW_Sprint*)",
+      "Write(file_path=FINDINGS_Sprint*)"
+    ]
+  },
   "enabledMcpjsonServers": ["codegraph"],
   "enableAllProjectMcpServers": true,
   "hooks": {
