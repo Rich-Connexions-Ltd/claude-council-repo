@@ -308,7 +308,7 @@ def test_safe_apply_indexer_accepts_read_open(bs):
 
 def test_safe_apply_sprints_accepts_clean(bs):
     md = "# Project Sprints\n\n## Sprint 1: Foo\n\nGoal: ship.\n"
-    ok, reason = bs._safe_apply_sprints_output(md)
+    ok, reason, _cleaned = bs._safe_apply_sprints_output(md)
     assert ok, reason
 
 
@@ -320,7 +320,7 @@ def test_safe_apply_sprints_accepts_clean(bs):
     ("# T\n## Sprint 1\nhello\x1b[31mred\x1b[0m\n", "control"),
 ])
 def test_safe_apply_sprints_rejects(bs, bad, reason_substring):
-    ok, reason = bs._safe_apply_sprints_output(bad)
+    ok, reason, _cleaned = bs._safe_apply_sprints_output(bad)
     assert not ok
     assert reason_substring in reason
 
@@ -700,7 +700,7 @@ def test_envelope_malformed_json_aborts_step(bs, tmp_path, monkeypatch):
 def test_sprints_validator_accepts_h2_start(bs):
     """Plan contract allows # OR ## as the leading heading."""
     md = "## Sprints\n\n## Sprint 1: foo\nGoal: x\n"
-    ok, reason = bs._safe_apply_sprints_output(md)
+    ok, reason, _cleaned = bs._safe_apply_sprints_output(md)
     assert ok, reason
 
 
@@ -761,9 +761,9 @@ def test_safe_apply_sprints_output_size_boundary(bs):
     base = "# T\n## Sprint 1\n"
     just_under = base + "x" * (bs.MAX_TOTAL_BYTES - len(base) - 10)
     just_over = base + "x" * (bs.MAX_TOTAL_BYTES)
-    ok_under, _ = bs._safe_apply_sprints_output(just_under)
+    ok_under, _, _c = bs._safe_apply_sprints_output(just_under)
     assert ok_under
-    ok_over, reason = bs._safe_apply_sprints_output(just_over)
+    ok_over, reason, _c2 = bs._safe_apply_sprints_output(just_over)
     assert not ok_over
     assert "exceeds" in reason
 

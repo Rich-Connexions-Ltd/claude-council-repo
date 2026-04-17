@@ -229,20 +229,34 @@ def _safe_apply_indexer_output(stdout: str, dest: Path) -> tuple[bool, str]:
     return True, ""
 
 
-def _safe_apply_sprints_output(stdout: str) -> tuple[bool, str]:
-    """Validate Claude-generated SPRINTS.md before writing."""
-    if not stdout.strip():
-        return False, "empty output"
-    if len(stdout.encode()) > MAX_TOTAL_BYTES:
-        return False, f"output exceeds {MAX_TOTAL_BYTES} bytes"
-    bad = next((c for c in stdout if c in _FORBIDDEN_CTRL_CHARS), None)
+def _safe_apply_sprints_output(stdout: str) -> tuple[bool, str, str]:
+    """Validate Claude-generated SPRINTS.md before writing.
+
+    Returns ``(valid, reason, cleaned_text)``. The cleaned text has
+    any preamble lines before the first markdown heading stripped —
+    Claude CLI often returns "Here's the content:" before the actual
+    markdown.
+    """
+    text = stdout.strip()
+    if not text:
+        return False, "empty output", ""
+    if len(text.encode()) > MAX_TOTAL_BYTES:
+        return False, f"output exceeds {MAX_TOTAL_BYTES} bytes", ""
+    bad = next((c for c in text if c in _FORBIDDEN_CTRL_CHARS), None)
     if bad is not None:
-        return False, f"contains control character {bad!r}"
-    if not re.match(r"^#{1,6}\s", stdout):
-        return False, "does not start with a markdown heading"
-    if "## Sprint " not in stdout:
-        return False, "no '## Sprint ' heading found"
-    return True, ""
+        return False, f"contains control character {bad!r}", ""
+    # Strip any preamble lines before the first markdown heading.
+    lines = text.splitlines()
+    heading_idx = next(
+        (i for i, line in enumerate(lines) if re.match(r"#{1,6}\s", line)),
+        -1,
+    )
+    if heading_idx < 0:
+        return False, "no markdown heading found in output", ""
+    cleaned = "\n".join(lines[heading_idx:])
+    if "## Sprint " not in cleaned:
+        return False, "no '## Sprint ' heading found", ""
+    return True, "", cleaned
 
 
 def _validate_patch(patch_text: str) -> tuple[bool, str]:
@@ -893,20 +907,20 @@ def step4_sprints(ctx: dict) -> None:
             say(f"  ✗ generator failed: {err[:500] if err else 'no stderr'}", indent=1)
             say("    falling through to manual entry", indent=1)
         else:
-            valid, reason = _safe_apply_sprints_output(out)
+            valid, reason, cleaned = _safe_apply_sprints_output(out)
             if not valid:
                 say(f"  ✗ generator output rejected: {reason}", indent=1)
                 say("    falling through to manual entry", indent=1)
             else:
                 say("  Claude proposed the following SPRINTS.md:", indent=1)
-                preview = out[:800] + ("\n..." if len(out) > 800 else "")
+                preview = cleaned[:800] + ("\n..." if len(cleaned) > 800 else "")
                 say(preview, indent=2)
                 if ask_yes_no(
                     "  Apply this to SPRINTS.md?",
                     default=True,
                     prompt_id="sprints.apply_generated",
                 ):
-                    (REPO_ROOT / "SPRINTS.md").write_text(out, encoding="utf-8")
+                    (REPO_ROOT / "SPRINTS.md").write_text(cleaned, encoding="utf-8")
                     say("  ✓ sprint roadmap written to SPRINTS.md", indent=1)
                     return
                 say("    declined — falling through to manual entry", indent=1)
