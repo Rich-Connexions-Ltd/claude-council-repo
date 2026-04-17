@@ -69,6 +69,7 @@ DEFAULT_ANSWERS: dict = {
         "Skip council entirely — ship as solo dev without reviewer"
     ),
     "bootstrap.rerun": False,
+    "handoff.commit": True,
 }
 
 EXIT_OK = 0

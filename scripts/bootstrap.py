@@ -1105,15 +1105,33 @@ def _recommend_library_entry(
 ) -> dict | None:
     """Pick a best-match entry based on the user's selected stack.
     Returns None if no entry matches — caller falls back to asking
-    the user to choose."""
+    the user to choose.
+
+    When multiple entries match, prefer the most specific — the one
+    whose ``stacks`` list has the highest overlap ratio with the
+    user's selection. Ties broken by shortest stacks list (most
+    focused entry). This ensures ``rust-systems`` beats
+    ``data-pipeline`` for a Rust-only project even though both list
+    ``rust`` in their stacks.
+    """
     user_stacks = set(ctx.get("languages", []) + ctx.get("other_languages", []))
     if not user_stacks:
         return None
+    candidates: list[tuple[float, int, dict]] = []
     for entry in library:
         entry_stacks = set(entry.get("stacks", []))
-        if user_stacks & entry_stacks:
-            return entry
-    return None
+        overlap = user_stacks & entry_stacks
+        if not overlap:
+            continue
+        # Jaccard-like specificity: overlap / entry_stacks.
+        # Higher = the entry is more focused on the user's stack.
+        specificity = len(overlap) / len(entry_stacks) if entry_stacks else 0
+        candidates.append((specificity, len(entry_stacks), entry))
+    if not candidates:
+        return None
+    # Sort by specificity descending, then stacks-list length ascending.
+    candidates.sort(key=lambda t: (-t[0], t[1]))
+    return candidates[0][2]
 
 
 def step6_domain_expert(ctx: dict) -> None:
@@ -1212,6 +1230,24 @@ def step7_smoke_test(ctx: dict) -> None:
                 else f"  ✗ process-test failed ({r3.returncode})", indent=1)
 
 
+def _auto_commit_bootstrap() -> bool:
+    """Stage and commit all bootstrap changes. Returns True on success."""
+    try:
+        subprocess.run(
+            ["git", "add", "-A"], cwd=str(REPO_ROOT),
+            check=True, capture_output=True, text=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Bootstrap: initial project setup"],
+            cwd=str(REPO_ROOT),
+            check=True, capture_output=True, text=True,
+        )
+        return True
+    except subprocess.CalledProcessError as exc:
+        say(f"  git commit failed: {exc.stderr[:200] if exc.stderr else exc}", indent=1)
+        return False
+
+
 def step8_handoff(ctx: dict) -> None:
     hr("Step 8 — Ready")
     BOOTSTRAP_MARKER.write_text(
@@ -1222,15 +1258,25 @@ def step8_handoff(ctx: dict) -> None:
         encoding="utf-8",
     )
 
+    if ask_yes_no(
+        "Commit all bootstrap changes now?",
+        default=True,
+        prompt_id="handoff.commit",
+    ):
+        if _auto_commit_bootstrap():
+            say("  Committed: Bootstrap: initial project setup")
+        else:
+            say("  Commit failed. Run manually: git add -A && git commit -m 'Bootstrap: initial project setup'")
+    else:
+        say("  Skipped. Commit manually when ready: git add -A && git commit -m 'Bootstrap: initial project setup'")
+
     print(textwrap.dedent(f"""
         All set. Your repo is ready to use.
 
         Next steps:
-          1. Review the changes:   git status
-          2. Commit the bootstrap: git add -A && git commit -m "Bootstrap: initial project setup"
-          3. Open Claude Code in this directory.
-          4. Type "Sprint 1" to begin your first sprint under the Sprint process.
-          5. Toggle review mode with "human review on" / "human review off".
+          1. Open Claude Code in this directory.
+          2. Type "Sprint 1" to begin your first sprint under the Sprint process.
+          3. Toggle review mode with "human review on" / "human review off".
 
         Files to inspect:
           • CLAUDE.md           ← project overview for Claude Code
